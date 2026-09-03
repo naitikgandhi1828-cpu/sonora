@@ -45,6 +45,18 @@ jobs:
             DEVELOPMENT_TEAM="" \
             clean build
 
+      - name: Verify background audio survived Info.plist generation
+        run: |
+          PLIST="build/Build/Products/Release-iphoneos/Sonora.app/Info.plist"
+          test -f "$PLIST" || { echo "Info.plist missing at $PLIST"; exit 1; }
+          echo "--- built Info.plist ---"
+          plutil -p "$PLIST"
+          echo "--- assertions ---"
+          plutil -extract UIBackgroundModes xml1 -o - "$PLIST" | grep -q "<string>audio</string>"             || { echo "FAIL: UIBackgroundModes does not contain 'audio' -- playback would stop on screen lock"; exit 1; }
+          echo "OK: UIBackgroundModes contains 'audio'"
+          test "$(plutil -extract CFBundleIdentifier raw -o - "$PLIST")" = "com.example.Sonora"             || { echo "FAIL: bundle identifier changed"; exit 1; }
+          echo "OK: bundle identifier is com.example.Sonora"
+
       - name: Wrap the .app into a .ipa
         run: |
           APP="build/Build/Products/Release-iphoneos/Sonora.app"

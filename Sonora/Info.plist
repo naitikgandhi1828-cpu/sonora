@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Keys Xcode's INFOPLIST_KEY_* generation drops for this target.
+	     Without UIBackgroundModes=audio, iOS suspends the app on screen
+	     lock and playback stops, even though AudioSessionManager sets the
+	     .playback category. GENERATE_INFOPLIST_FILE stays YES, so Xcode
+	     merges its generated keys on top of this partial file. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
+	<key>UIFileSharingEnabled</key>
+	<true/>
+</dict>
+</plist>
