@@ -33,42 +33,49 @@ your sideloading completely separate from your real account. Either works.
 
 ---
 
-## Part 1 — Get GitHub to build the app (~15 min)
+## Part 1 — Get GitHub to build the app (~10 min)
+
+The project already ships as a **prepared git repository with the first
+commit made**, so you don't have to drag 35 files through a browser. You
+just point GitHub Desktop at the folder and press Publish.
 
 1. **Make a free GitHub account** at [github.com](https://github.com) if you
-   don't have one.
+   don't already have one. Remember the username and password.
 
-2. **Create a new repository.** Click **+** (top right) → **New repository**.
-   Name it `sonora`. Public or private both work — see the note at the
-   bottom about build minutes.
+2. **Install [GitHub Desktop](https://desktop.github.com)** and sign in with
+   that account (File → Options → Accounts → Sign in).
 
-3. **Upload the project.** Unzip `Sonora-iOS.zip` on your PC. Inside you'll
-   find a `Sonora` folder. On the empty repo page click
-   **uploading an existing file**, then drag in *everything inside* the
-   `Sonora` folder — `Sonora.xcodeproj`, the `Sonora` source folder,
-   `.github`, `README.md`. Click **Commit changes**.
+3. **Unzip `Sonora-iOS.zip`** somewhere sensible — `Documents\Sonora` is
+   fine. Inside you'll find a folder named `Sonora` containing
+   `Sonora.xcodeproj`, a `Sonora` source folder, `README.md` and a hidden
+   `.git` folder. That whole folder is the repository.
 
-   > If the drag-and-drop uploader skips the `.github` folder (browsers
-   > sometimes hide dot-folders), install
-   > [GitHub Desktop](https://desktop.github.com) instead and drop the whole
-   > folder in — it handles hidden folders correctly.
+4. **Add it to GitHub Desktop:** File → **Add local repository…** → browse to
+   that `Sonora` folder → **Add repository**. It should recognise it
+   immediately and show "1 commit" with nothing left to commit. If it
+   complains the folder isn't a repository, you unzipped one level too deep
+   or too shallow — pick the folder that directly contains `README.md`.
 
-4. **Run the build.** Go to the **Actions** tab. If it asks, click
-   **I understand my workflows, enable them**. Pick **Build unsigned IPA**
-   in the left sidebar → **Run workflow** → the green **Run workflow**
-   button.
+5. **Publish it:** click **Publish repository** at the top. Name it `sonora`.
+   Untick "Keep this code private" if you want unlimited free build minutes
+   (see the note at the bottom). Click **Publish repository**.
 
-5. **Wait ~5 minutes.** The run turns green when it's done. Click into it,
-   scroll to **Artifacts** at the bottom, and download **Sonora-ipa**.
+6. **Run the build:** open your repo on github.com → **Actions** tab → click
+   **I understand my workflows, enable them** if prompted → choose
+   **Build unsigned IPA** in the left sidebar → **Run workflow** → the green
+   **Run workflow** button.
 
-6. **Unzip what you downloaded.** GitHub wraps artifacts in a zip, so you'll
-   get `Sonora-ipa.zip` containing `Sonora.ipa`. That `.ipa` is the app.
-   Keep it somewhere easy to find.
+7. **Wait about 5 minutes.** The run goes green when it finishes. Click into
+   it, scroll to **Artifacts** at the bottom, download **Sonora-ipa**.
 
-If the build fails, open the failed step and copy the red error text —
-that's exactly what's needed to diagnose it.
+8. **Unzip what you downloaded.** GitHub wraps artifacts in a zip, so you get
+   `Sonora-ipa.zip` containing `Sonora.ipa`. That file is the app. Keep it
+   somewhere you can find it.
 
----
+> **If the build fails**, click the failed step and copy the red error text.
+> That text is exactly what's needed to fix it — send it over and you'll get
+> a corrected project back. A first-build failure is normal for a codebase
+> this size and is usually a one-line fix.
 
 ## Part 2 — Set up AltStore on Windows (~20 min)
 
