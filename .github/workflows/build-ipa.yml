@@ -1,0 +1,65 @@
+# Builds an UNSIGNED Sonora.ipa on a GitHub-hosted Mac.
+#
+# You do not need a Mac of your own. Push this repo to GitHub, run the
+# workflow, download the artifact, then sign + install it with AltStore
+# on Windows using your free Apple ID.
+#
+# Run it from the repo's "Actions" tab -> "Build unsigned IPA" -> "Run workflow".
+
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:        # lets you press the button manually
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    # macos-15 ships Xcode 16, which this project needs.
+    # macos-26 also works if you'd rather be on the newest image.
+    runs-on: macos-15
+
+    steps:
+      - name: Check out the project
+        uses: actions/checkout@v4
+
+      - name: Report toolchain
+        run: |
+          xcodebuild -version
+          xcodebuild -list -project Sonora.xcodeproj
+
+      - name: Build for device without code signing
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Sonora.xcodeproj \
+            -scheme Sonora \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            clean build
+
+      - name: Wrap the .app into a .ipa
+        run: |
+          APP="build/Build/Products/Release-iphoneos/Sonora.app"
+          test -d "$APP" || { echo "Build product missing at $APP"; exit 1; }
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          # AltStore signs it on install, so strip anything left over.
+          rm -rf Payload/Sonora.app/_CodeSignature
+          rm -f  Payload/Sonora.app/embedded.mobileprovision
+          zip -qry Sonora.ipa Payload
+          ls -lh Sonora.ipa
+
+      - name: Upload the IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sonora-ipa
+          path: Sonora.ipa
+          retention-days: 30
