@@ -101,7 +101,23 @@ struct EQPreset: Codable, Hashable, Identifiable {
     ]
 
     static func flatBands() -> [EQBand] {
-        standardFrequencies.map { EQBand(frequency: $0, gain: 0, bandwidth: 0.5) }
+        let last = standardFrequencies.count - 1
+        return standardFrequencies.enumerated().map { i, freq in
+            // The centres above are one octave apart, so bands need ~1 octave
+            // of bandwidth to overlap and sum smoothly. At the previous 0.5
+            // the response dipped between every slider, which made the curve
+            // you drew and the curve you heard disagree.
+            //
+            // The end bands are shelves rather than peaks: a 31 Hz peaking
+            // filter does almost nothing on a phone speaker or on most
+            // headphones, whereas a low shelf lifts the whole bottom octave.
+            // Same at the top. This is what makes a bass or treble boost feel
+            // powerful instead of narrow.
+            let type: EQBandType = i == 0 ? .lowShelf
+                                 : i == last ? .highShelf
+                                 : .parametric
+            return EQBand(frequency: freq, gain: 0, bandwidth: 1.0, type: type)
+        }
     }
 
     static func make(_ name: String, _ gains: [Float], preamp: Float = 0) -> EQPreset {

@@ -231,7 +231,7 @@ final class AppSettings: ObservableObject {
 
         reverbEnabled = b("revOn", false)
         reverbRoom = ReverbRoom(rawValue: i("revRoom", 3)) ?? .mediumHall
-        reverbMix = n("revMix", 20)
+        reverbMix = n("revMix", 35)
         reverbDecay = n("revDecay", 2.4)
         reverbDamping = n("revDamp", 0.5)
         reverbPreDelay = n("revPre", 0.02)
@@ -313,7 +313,7 @@ final class AppSettings: ObservableObject {
     func resetDSP() {
         bassDB = 0; trebleDB = 0; toneEnabled = false
         stereoWidth = 1; balance = 0; monoDownmix = false
-        reverbEnabled = false; reverbMix = 20
+        reverbEnabled = false; reverbMix = 35
         playbackRate = 1; pitchCents = 0
         masterPreampDB = 0
     }

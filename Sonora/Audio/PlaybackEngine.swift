@@ -13,6 +13,7 @@ import Foundation
 import AVFoundation
 import Combine
 import QuartzCore
+import Accelerate
 
 /// Everything the engine needs to play one item. The library layer resolves
 /// security-scoped URLs and replay-gain before handing this over.
@@ -577,29 +578,47 @@ final class PlaybackEngine {
         engine.mainMixerNode.removeTap(onBus: 0)
         guard let handler else { return }
         let format = engine.mainMixerNode.outputFormat(forBus: 0)
-        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+
+        // Allocated once, up here, instead of on every buffer inside the tap.
+        // The old version built a fresh 24-element array and hopped to the
+        // main thread ~47 times a second, which both stalled the tap thread
+        // and flooded SwiftUI with invalidations.
+        let bins = 24
+        var levels = [Float](repeating: 0, count: bins)
+        var lastPublish: CFTimeInterval = 0
+
+        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 2048, format: format) { buffer, _ in
             guard let data = buffer.floatChannelData else { return }
             let frames = Int(buffer.frameLength)
-            let channels = Int(buffer.format.channelCount)
-            let bins = 24
-            var levels = [Float](repeating: 0, count: bins)
             guard frames > 0 else { return }
+            let channels = Int(buffer.format.channelCount)
             let per = max(1, frames / bins)
+
             for b in 0..<bins {
-                var peak: Float = 0
                 let start = b * per
                 let end = min(frames, start + per)
-                if start >= end { continue }
+                guard start < end else { continue }
+                var peak: Float = 0
                 for c in 0..<channels {
-                    let ptr = data[c]
-                    for i in start..<end {
-                        let v = abs(ptr[i])
-                        if v > peak { peak = v }
-                    }
+                    var m: Float = 0
+                    // vDSP replaces the hand-rolled abs/compare loop; it is
+                    // vectorised and keeps this tap well inside its deadline.
+                    vDSP_maxmgv(data[c] + start, 1, &m, vDSP_Length(end - start))
+                    if m > peak { peak = m }
                 }
-                levels[b] = min(1, peak)
+                // Decay toward the new peak so bars fall smoothly rather than
+                // flickering, which also hides the lower publish rate.
+                levels[b] = min(1, max(peak, levels[b] * 0.72))
             }
-            DispatchQueue.main.async { handler(levels) }
+
+            // Publish at ~15 Hz, not once per buffer. A spectrum display gains
+            // nothing above this, and it cuts main-thread wake-ups by two
+            // thirds.
+            let now = CACurrentMediaTime()
+            guard now - lastPublish >= 1.0 / 15.0 else { return }
+            lastPublish = now
+            let snapshot = levels
+            DispatchQueue.main.async { handler(snapshot) }
         }
     }
 }

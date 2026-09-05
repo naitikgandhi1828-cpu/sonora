@@ -10,6 +10,7 @@ import Foundation
 import Combine
 import SwiftUI
 import UIKit
+import QuartzCore
 
 @MainActor
 final class PlaybackController: ObservableObject {
@@ -57,11 +58,31 @@ final class PlaybackController: ObservableObject {
         restoreState()
     }
 
+    /// Wall-clock of the last `position` publish, for the throttle below.
+    private var lastPositionPublish: CFTimeInterval = 0
+
     private func wireEngine() {
         engine.onTick = { [weak self] pos, dur in
             guard let self, !self.isScrubbing else { return }
+
+            // The engine ticks at 25 Hz because crossfade timing needs it, but
+            // `position` lives on this ObservableObject, so every publish
+            // invalidates every view observing the player — the library list
+            // included. A progress bar cannot show more than ~10 Hz anyway, so
+            // throttle to that and cut SwiftUI's work by 60%. A jump larger
+            // than a second (seek, track change) always goes through
+            // immediately so the UI never looks stuck.
+            let now = CACurrentMediaTime()
+            let jumped = abs(pos - self.position) > 1.0
+            guard jumped || now - self.lastPositionPublish >= 0.1 else { return }
+            self.lastPositionPublish = now
+
             self.position = pos
-            self.duration = dur > 0 ? dur : (self.currentTrack?.duration ?? 0)
+            let newDuration = dur > 0 ? dur : (self.currentTrack?.duration ?? 0)
+            // Assigning an unchanged value still fires objectWillChange.
+            if abs(newDuration - self.duration) > 0.001 {
+                self.duration = newDuration
+            }
             self.refreshNowPlaying(throttled: true)
         }
         engine.onAdvanced = { [weak self] trackID in

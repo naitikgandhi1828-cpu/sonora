@@ -63,12 +63,22 @@ final class ReverbUnit {
 
     /// `mix` is 0...100 percent wet.
     func setMix(_ mix: Double) {
-        let clamped = Float(max(0, min(100, mix)))
+        let pct = max(0, min(100, mix))
         switch backend {
         case .simple(let r):
-            r.wetDryMix = clamped
+            r.wetDryMix = Float(pct)
         case .advanced(let e):
-            setParam(e, kReverb2Param_DryWetMix, clamped)
+            // Reverb2's DryWetMix is a linear amplitude blend, so the bottom
+            // half of the slider is nearly inaudible. A square-root curve is
+            // roughly equal-power: 25% on the slider becomes 50% wet, which is
+            // what the ear expects from "quarter reverb".
+            let norm = Float(pct / 100)
+            setParam(e, kReverb2Param_DryWetMix, sqrt(norm) * 100)
+
+            // Reverb2's wet path sits well below the dry signal at matched
+            // mix. Without this lift, toggling the effect on barely changes
+            // anything, which is exactly the symptom being fixed.
+            setParam(e, kReverb2Param_Gain, norm * 6.0)   // 0...+6 dB
         }
     }
 
@@ -87,19 +97,35 @@ final class ReverbUnit {
         case .simple(let r):
             r.loadFactoryPreset(room.avPreset)
         case .advanced(let e):
+            // shape = (minDelay, maxDelay, decayAt0Hz, decayAtNyquist)
             let shape = room.reverb2Shape
-            let minDelay = max(0.0001, Float(preDelay) * 0.35 + shape.0)
-            let maxDelay = max(minDelay + 0.001, Float(preDelay) + shape.1)
-            // Damping shortens the high-frequency tail relative to the low one.
-            let decayLow = Float(max(0.01, decaySeconds))
-            let decayHigh = max(0.01, decayLow * Float(1.0 - 0.85 * max(0, min(1, damping))))
+
+            let pre = Float(max(0, min(0.2, preDelay)))
+            let minDelay = max(0.0001, shape.0 + pre)
+            let maxDelay = max(minDelay + 0.005, shape.1 + pre)
+
+            // The decay slider *scales* the room's own decay rather than
+            // replacing it. Previously it overwrote both decay times, so every
+            // room collapsed to the same tail and the only surviving difference
+            // was a few milliseconds of pre-delay — inaudible. Rooms now keep
+            // their character (a plate stays tight, a cathedral stays huge)
+            // while the slider still stretches or shortens them.
+            let scale = Float(max(0.1, decaySeconds)) / 2.4   // 2.4 s = slider centre
+            let d = max(0, min(1, Float(damping)))
+
+            let decayLow = min(20, max(0.05, shape.2 * scale))
+            // Damping darkens the tail by shortening it at Nyquist. Clamped
+            // below decayLow so the high end never outlasts the low end.
+            let decayHigh = min(decayLow, max(0.05, shape.3 * scale * (1.0 - 0.7 * d)))
 
             setParam(e, kReverb2Param_MinDelayTime, minDelay)
             setParam(e, kReverb2Param_MaxDelayTime, min(maxDelay, 1.0))
-            setParam(e, kReverb2Param_DecayTimeAt0Hz, min(decayLow, 20))
-            setParam(e, kReverb2Param_DecayTimeAtNyquist, min(decayHigh, 20))
-            setParam(e, kReverb2Param_RandomizeReflections, 100)
-            setParam(e, kReverb2Param_Gain, 0)
+            setParam(e, kReverb2Param_DecayTimeAt0Hz, decayLow)
+            setParam(e, kReverb2Param_DecayTimeAtNyquist, decayHigh)
+            // Range is 1...1000, not 0...100. At 100 the reflection pattern is
+            // sparse and metallic; high values give the dense, smooth tail that
+            // reads as a real space.
+            setParam(e, kReverb2Param_RandomizeReflections, 800)
         }
     }
 
