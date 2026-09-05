@@ -146,14 +146,24 @@ struct SlimProgressBar: View {
 
 // MARK: - Spectrum visualizer
 
+/// Meter levels live on their own observable object rather than on
+/// PlaybackController. Published there, every one of the ~15 updates a second
+/// invalidated *all* views observing the player — the DSP and settings screens
+/// included — which is what made the app feel sluggish everywhere. Only the
+/// spectrum needs this data, so only the spectrum observes it.
+final class MeterState: ObservableObject {
+    @Published var levels: [Float] = Array(repeating: 0, count: 24)
+}
+
 struct SpectrumView: View {
-    let levels: [Float]
+    @ObservedObject var meters: MeterState
     var barCount: Int = 24
 
     @EnvironmentObject private var themes: ThemeManager
 
     var body: some View {
         GeometryReader { geo in
+            let levels = meters.levels
             let spacing = geo.size.width / Double(max(1, barCount)) * 0.3
             let barWidth = (geo.size.width - spacing * Double(barCount - 1)) / Double(barCount)
             HStack(alignment: .bottom, spacing: spacing) {

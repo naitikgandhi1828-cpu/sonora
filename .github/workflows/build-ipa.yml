@@ -56,6 +56,11 @@ jobs:
           echo "OK: UIBackgroundModes contains 'audio'"
           test "$(plutil -extract CFBundleIdentifier raw -o - "$PLIST")" = "com.example.Sonora"             || { echo "FAIL: bundle identifier changed"; exit 1; }
           echo "OK: bundle identifier is com.example.Sonora"
+          SHORT="$(plutil -extract CFBundleShortVersionString raw -o - "$PLIST")"
+          BUILD="$(plutil -extract CFBundleVersion raw -o - "$PLIST")"
+          test -n "$SHORT" || { echo "FAIL: CFBundleShortVersionString missing"; exit 1; }
+          test "$SHORT" != "1.0" || { echo "FAIL: version is still the 1.0 default -- MARKETING_VERSION did not apply"; exit 1; }
+          echo "OK: version $SHORT (build $BUILD)"
 
       - name: Wrap the .app into a .ipa
         run: |

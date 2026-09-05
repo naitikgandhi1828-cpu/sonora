@@ -144,7 +144,7 @@ struct NowPlayingView: View {
                     .shadow(color: .black.opacity(0.45), radius: 26, y: 14)
 
                 if settings.showVisualizer && player.isPlaying {
-                    SpectrumView(levels: player.meterLevels)
+                    SpectrumView(meters: player.meters)
                         .frame(height: side * 0.16)
                         .padding(.horizontal, side * 0.08)
                         .frame(maxHeight: .infinity, alignment: .bottom)
@@ -158,6 +158,25 @@ struct NowPlayingView: View {
         .aspectRatio(1, contentMode: .fit)
         .frame(maxHeight: 380)
         .onTapGesture(count: 2) { player.togglePlayPause(); Haptics.tap() }
+        // Swipe the artwork to change track. Attached here rather than to the
+        // whole screen so it can never be confused with scrubbing the seek bar
+        // underneath, and `simultaneousGesture` leaves vertical scrolling and
+        // sheet dismissal working — the handler ignores anything that is not
+        // clearly a horizontal flick.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 30)
+                .onEnded { value in
+                    let dx = value.translation.width
+                    let dy = value.translation.height
+                    guard abs(dx) > 60, abs(dx) > abs(dy) * 1.5 else { return }
+                    if dx < 0 {
+                        player.next(userInitiated: true)
+                    } else {
+                        player.previous()
+                    }
+                    Haptics.tap()
+                }
+        )
     }
 
     private var titleBlock: some View {

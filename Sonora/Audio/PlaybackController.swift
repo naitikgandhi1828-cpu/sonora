@@ -25,7 +25,8 @@ final class PlaybackController: ObservableObject {
     @Published private(set) var currentTrack: Track?
     @Published private(set) var currentArtwork: UIImage?
     @Published private(set) var errorMessage: String?
-    @Published private(set) var meterLevels: [Float] = Array(repeating: 0, count: 24)
+    /// Meter levels are deliberately NOT @Published here — see MeterState.
+    let meters = MeterState()
     @Published private(set) var queueSourceName: String = ""
 
     /// The order the queue was built in, before shuffling.
@@ -106,7 +107,7 @@ final class PlaybackController: ObservableObject {
         }
         engine.setMeterTap { [weak self] levels in
             guard let self, self.settings.showVisualizer else { return }
-            self.meterLevels = levels
+            self.meters.levels = levels
         }
     }
 

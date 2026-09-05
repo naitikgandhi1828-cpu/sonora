@@ -81,6 +81,18 @@ final class PlaybackEngine {
 
     private var ticker: Timer?
 
+    /// Set the moment a new schedule is installed, cleared once the node
+    /// reports a sample time that actually falls inside it.
+    ///
+    /// `AVAudioPlayerNode.lastRenderTime` keeps reporting the *previous*
+    /// schedule's frame for a render cycle or two after stop()/scheduleSegment()
+    /// /play(). That stale frame sits past the freshly scheduled segment, so
+    /// `currentSegment()` fell through to its `segments.last` fallback and
+    /// handed back the chained next track — and `tick()` read that as a gapless
+    /// advance. The visible result was that scrubbing the seek bar skipped to
+    /// the next song.
+    private var awaitingFirstRender = false
+
     // MARK: Callbacks (set by PlaybackController)
 
     /// The engine crossed into a different scheduled segment.
@@ -249,6 +261,7 @@ final class PlaybackEngine {
         chainedItem = nil
         segments.removeAll()
         nextScheduleFrame = 0
+        awaitingFirstRender = true
         openFiles = [item.trackID: file]
 
         currentFormat = file.processingFormat
@@ -499,6 +512,10 @@ final class PlaybackEngine {
 
     /// Playback position within the *current* item, in seconds.
     var currentTime: TimeInterval {
+        // During the stale window the node's frame belongs to the old
+        // schedule, so report the position we just seeked to rather than a
+        // number derived from it.
+        if awaitingFirstRender { return currentItem?.startTime ?? 0 }
         guard let seg = currentSegment(), let frame = nodeSampleTime() else {
             return currentItem?.startTime ?? 0
         }
@@ -550,8 +567,18 @@ final class PlaybackEngine {
 
         guard isPlaying || currentItem != nil else { return }
 
+        // Wait for the node to actually render into the new schedule before
+        // trusting its sample time for advance detection.
+        if awaitingFirstRender {
+            if let frame = nodeSampleTime(), let first = segments.first,
+               frame >= first.startFrame, frame < first.endFrame {
+                awaitingFirstRender = false
+            }
+        }
+
         // Detect gapless segment advance.
-        if let seg = currentSegment(),
+        if !awaitingFirstRender,
+           let seg = currentSegment(),
            let item = currentItem,
            seg.trackID != item.trackID {
             if let chained = chainedItem, chained.trackID == seg.trackID {
