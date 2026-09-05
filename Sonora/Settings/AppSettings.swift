@@ -138,6 +138,8 @@ final class AppSettings: ObservableObject {
     @Published var reverbDamping: Double { didSet { save(reverbDamping, "revDamp") } }  // 0...1, advanced engine
     @Published var reverbPreDelay: Double { didSet { save(reverbPreDelay, "revPre") } } // seconds
     @Published var reverbUseAdvanced: Bool { didSet { save(reverbUseAdvanced, "revAdv") } }
+    /// true = Freeverb (Schroeder-Moorer), false = Apple AUReverb2.
+    @Published var reverbUseFreeverb: Bool { didSet { save(reverbUseFreeverb, "revFv") } }
 
     // MARK: Stereo / limiter
 
@@ -236,6 +238,7 @@ final class AppSettings: ObservableObject {
         reverbDamping = n("revDamp", 0.5)
         reverbPreDelay = n("revPre", 0.02)
         reverbUseAdvanced = b("revAdv", true)
+        reverbUseFreeverb = b("revFv", true)
 
         stereoWidth = n("width", 1.0)
         balance = n("balance", 0)

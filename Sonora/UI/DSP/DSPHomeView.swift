@@ -119,11 +119,29 @@ struct EffectsRackView: View {
                 }
             }
 
+            if player.dsp.freeverb != nil {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Engine")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(themes.theme.textPrimary)
+                    Picker("Engine", selection: $settings.reverbUseFreeverb) {
+                        Text("Freeverb").tag(true)
+                        Text("Apple").tag(false)
+                    }
+                    .pickerStyle(.segmented)
+                    Text(settings.reverbUseFreeverb
+                         ? "Eight comb filters into four allpass diffusers. Denser and warmer."
+                         : "Apple's AUReverb2. Cleaner, less coloured.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(themes.theme.textSecondary)
+                }
+            }
+
             LabeledSlider(title: "Wet Mix", value: $settings.reverbMix, range: 0...100,
                           format: { String(format: "%.0f%%", $0) },
-                          onReset: { settings.reverbMix = 20 })
+                          onReset: { settings.reverbMix = 35 })
 
-            if player.dsp.reverb.isAdvanced {
+            if player.dsp.reverb.isAdvanced || settings.reverbUseFreeverb {
                 LabeledSlider(title: "Decay", value: $settings.reverbDecay, range: 0.2...12,
                               format: { String(format: "%.1f s", $0) },
                               onReset: { settings.reverbDecay = 2.4 })

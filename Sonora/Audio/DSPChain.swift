@@ -7,10 +7,14 @@
 //  Signal flow:
 //
 //    playerA ─┐
-//             ├─▶ sourceMixer ─▶ EQ ─▶ Tone ─▶ Reverb ─▶ TimePitch ─▶ SonoraDSP ─▶ mainMixer ─▶ out
-//    playerB ─┘   (crossfade,        (10-band  (bass/   (wet mix)   (rate/     (pre-amp,
-//                  replay gain)      parametric) treble)             pitch)     width, balance,
-//                                                                               limiter)
+//             ├─▶ sourceMixer ─▶ EQ ─▶ Tone ─▶ Freeverb ─▶ Reverb2 ─▶ TimePitch ─▶ SonoraDSP ─▶ out
+//    playerB ─┘   (crossfade,      (10-band  (bass/   (custom)    (Apple)     (rate/      (pre-amp,
+//                  replay gain)    parametric) treble)                         pitch)      width,
+//                                                                                          balance,
+//                                                                                          limiter)
+//
+//  The two reverb nodes are mutually exclusive: whichever engine the user has
+//  not selected is bypassed, so only one is ever in circuit.
 //
 
 import Foundation
@@ -22,6 +26,10 @@ final class DSPChain {
     let eq: AVAudioUnitEQ
     let tone: AVAudioUnitEQ
     let reverb: ReverbUnit
+    /// Freeverb runs as a second reverb node rather than replacing the first.
+    /// Both stay wired into the graph and the unused one is bypassed, so
+    /// switching engines costs nothing and never needs a graph rebuild.
+    let freeverb: AVAudioUnitEffect?
     let timePitch: AVAudioUnitTimePitch
     let dsp: AVAudioUnitEffect?
 
@@ -30,7 +38,10 @@ final class DSPChain {
 
     /// Effect nodes in signal order, skipping anything that failed to load.
     var orderedNodes: [AVAudioNode] {
-        var nodes: [AVAudioNode] = [eq, tone, reverb.node, timePitch]
+        var nodes: [AVAudioNode] = [eq, tone]
+        if let freeverb { nodes.append(freeverb) }
+        nodes.append(reverb.node)
+        nodes.append(timePitch)
         if let dsp { nodes.append(dsp) }
         return nodes
     }
@@ -42,6 +53,14 @@ final class DSPChain {
         tone = AVAudioUnitEQ(numberOfBands: 2)
         reverb = ReverbUnit(preferAdvanced: settings.reverbUseAdvanced)
         timePitch = AVAudioUnitTimePitch()
+
+        FreeverbUnit.registerIfNeeded()
+        if AudioComponentFindNext(nil, &DSPChain.freeverbDesc) != nil {
+            freeverb = AVAudioUnitEffect(audioComponentDescription: FreeverbUnit.componentDescription)
+        } else {
+            print("[DSPChain] Freeverb unavailable — falling back to AUReverb2")
+            freeverb = nil
+        }
 
         SonoraDSPUnit.registerIfNeeded()
         if AudioComponentFindNext(nil, &DSPChain.sonoraDesc) != nil {
@@ -57,6 +76,7 @@ final class DSPChain {
     }
 
     private static var sonoraDesc = SonoraDSPUnit.componentDescription
+    private static var freeverbDesc = FreeverbUnit.componentDescription
 
     // MARK: - Setup
 
@@ -103,6 +123,7 @@ final class DSPChain {
         s.$reverbDecay.sink { [weak self] _ in self?.applyReverb() }.store(in: &cancellables)
         s.$reverbDamping.sink { [weak self] _ in self?.applyReverb() }.store(in: &cancellables)
         s.$reverbPreDelay.sink { [weak self] _ in self?.applyReverb() }.store(in: &cancellables)
+        s.$reverbUseFreeverb.sink { [weak self] _ in self?.applyReverb() }.store(in: &cancellables)
 
         // Tempo / pitch
         s.$playbackRate.sink { [weak self] _ in self?.applyTempo() }.store(in: &cancellables)
@@ -156,13 +177,49 @@ final class DSPChain {
     }
 
     private func applyReverb() {
-        reverb.setBypassed(!settings.reverbEnabled)
-        guard settings.reverbEnabled else { return }
-        reverb.apply(room: settings.reverbRoom,
-                     decaySeconds: settings.reverbDecay,
-                     damping: settings.reverbDamping,
-                     preDelay: settings.reverbPreDelay)
-        reverb.setMix(settings.reverbMix)
+        let on = settings.reverbEnabled
+        let useFreeverb = settings.reverbUseFreeverb && freeverb != nil
+
+        // Exactly one engine is ever in circuit; the other is bypassed, which
+        // costs nothing and avoids stacking two reverbs in series.
+        reverb.setBypassed(!on || useFreeverb)
+        freeverb?.bypass = !on || !useFreeverb
+
+        guard on else { return }
+
+        if useFreeverb {
+            applyFreeverb()
+        } else {
+            reverb.apply(room: settings.reverbRoom,
+                         decaySeconds: settings.reverbDecay,
+                         damping: settings.reverbDamping,
+                         preDelay: settings.reverbPreDelay)
+            reverb.setMix(settings.reverbMix)
+        }
+    }
+
+    private func applyFreeverb() {
+        guard let freeverb else { return }
+        let tree = freeverb.auAudioUnit.parameterTree
+        func set(_ addr: FreeverbParam, _ value: Float) {
+            tree?.parameter(withAddress: addr.rawValue)?.value = value
+        }
+
+        // The room preset supplies a nominal decay and the slider scales it,
+        // exactly as on the AUReverb2 path, so switching engines keeps the
+        // same sense of space instead of jumping to a different room.
+        let shape = settings.reverbRoom.reverb2Shape
+        let scale = Float(max(0.1, settings.reverbDecay)) / 2.4
+        let effectiveDecay = shape.2 * scale
+        // Comb feedback saturates as it approaches 1, so the useful decay
+        // range maps onto roughly the first nine seconds.
+        let room = max(0.05, min(1, effectiveDecay / 9.0))
+
+        set(.mix, Float(max(0, min(100, settings.reverbMix))))
+        set(.roomSize, room)
+        set(.damping, Float(max(0, min(1, settings.reverbDamping))))
+        set(.width, 1)
+        set(.preDelayMS, Float(max(0, min(0.2, settings.reverbPreDelay)) * 1000))
     }
 
     private func applyTempo() {
