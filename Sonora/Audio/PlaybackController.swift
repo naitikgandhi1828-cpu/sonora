@@ -137,6 +137,19 @@ final class PlaybackController: ObservableObject {
 
         sleepTimer.onFade = { [weak self] multiplier in
             guard let self else { return }
+            // SleepTimer.cancel() signals "undo the fade" by sending 1.
+            // Previously that landed as 20*log10(1) = 0 dB, so cancelling a
+            // timer silently reset the user's pre-amp too.
+            if multiplier >= 1 {
+                self.restorePreampAfterSleep()
+                return
+            }
+            // Remember the user's own pre-amp before overwriting it, so the
+            // fade can be undone. Restoring a hard 0 discarded their setting
+            // every time the sleep timer ran.
+            if self.preSleepPreampDB == nil {
+                self.preSleepPreampDB = self.settings.masterPreampDB
+            }
             // Ride the master pre-amp down for a graceful fade.
             let db = multiplier <= 0 ? -60 : 20 * log10(max(multiplier, 0.001))
             self.settings.masterPreampDB = max(-24, min(0, db))
@@ -148,9 +161,20 @@ final class PlaybackController: ObservableObject {
                 self.stopAfterCurrent = true
             } else {
                 self.pause()
-                self.settings.masterPreampDB = 0
+                self.restorePreampAfterSleep()
             }
         }
+    }
+
+    /// Pre-amp value from before the sleep-timer fade started, if any.
+    private var preSleepPreampDB: Double?
+
+    private func restorePreampAfterSleep() {
+        // Only undo a fade that actually happened; otherwise leave the user's
+        // pre-amp exactly where they set it.
+        guard let saved = preSleepPreampDB else { return }
+        settings.masterPreampDB = saved
+        preSleepPreampDB = nil
     }
 
     private var stopAfterCurrent = false
@@ -438,7 +462,7 @@ final class PlaybackController: ObservableObject {
         if stopAfterCurrent {
             stopAfterCurrent = false
             pause()
-            settings.masterPreampDB = 0
+            restorePreampAfterSleep()
             return
         }
         if settings.repeatMode == .stopAfterCurrent {

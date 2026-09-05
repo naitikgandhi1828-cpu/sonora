@@ -222,8 +222,14 @@ final class PlaybackEngine {
         // Try to run the hardware at the file's native rate.
         let fileRate = file.processingFormat.sampleRate
         let achieved = session.preferSampleRate(fileRate)
-        if abs(achieved - chainFormat.sampleRate) > 1 {
-            chainFormat = AVAudioFormat(standardFormatWithSampleRate: achieved, channels: 2)!
+        // AVAudioSession.sampleRate reports 0 when the session has no active
+        // route (during an interruption, or mid route change). Building an
+        // AVAudioFormat at 0 Hz returns nil, so the force-unwrap below used to
+        // crash. Keep the current format in that case and let the route-change
+        // handler rebuild once a real rate exists.
+        if achieved > 0, abs(achieved - chainFormat.sampleRate) > 1,
+           let rebuilt = AVAudioFormat(standardFormatWithSampleRate: achieved, channels: 2) {
+            chainFormat = rebuilt
             for node in chain.orderedNodes { engine.disconnectNodeOutput(node) }
             engine.disconnectNodeOutput(sourceMixer)
             engine.disconnectNodeOutput(gainA)

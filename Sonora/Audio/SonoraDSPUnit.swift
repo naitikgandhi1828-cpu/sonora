@@ -39,6 +39,11 @@ private struct DSPState {
     var envelope: Float = 0
     var gain: Float = 1
     var sampleRate: Float = 48_000
+    /// Kept alongside `releaseCoef` so the coefficient can be rebuilt when the
+    /// sample rate changes. Deriving the millisecond value back out of the
+    /// coefficient would use the *new* rate and reproduce the same stale
+    /// number, so the raw setting has to be stored.
+    var releaseMS: Float = 120
     var ch0: UnsafeMutableRawPointer?
     var ch1: UnsafeMutableRawPointer?
 }
@@ -205,11 +210,17 @@ public final class SonoraDSPUnit: AUAudioUnit {
         case .limiterOn:     st.pointee.limiterOn = value
         case .limiterCeilDB: st.pointee.ceiling = powf(10, value / 20)
         case .limiterRelMS:
-            let sr = max(st.pointee.sampleRate, 8_000)
-            let samples = max(value, 1) * 0.001 * sr
-            st.pointee.releaseCoef = expf(-1.0 / samples)
+            st.pointee.releaseMS = max(value, 1)
+            refreshReleaseCoef(st)
         case .none: break
         }
+    }
+
+    /// Rebuilds the release coefficient from `releaseMS` at the current rate.
+    private static func refreshReleaseCoef(_ st: UnsafeMutablePointer<DSPState>) {
+        let sr = max(st.pointee.sampleRate, 8_000)
+        let samples = max(st.pointee.releaseMS, 1) * 0.001 * sr
+        st.pointee.releaseCoef = expf(-1.0 / max(samples, 1))
     }
 
     private static func read(_ addr: AUParameterAddress,
@@ -221,10 +232,7 @@ public final class SonoraDSPUnit: AUAudioUnit {
         case .monoDownmix:   return st.pointee.mono
         case .limiterOn:     return st.pointee.limiterOn
         case .limiterCeilDB: return 20 * log10f(max(st.pointee.ceiling, 1e-6))
-        case .limiterRelMS:
-            let sr = max(st.pointee.sampleRate, 8_000)
-            let samples = -1.0 / logf(max(st.pointee.releaseCoef, 1e-6))
-            return samples / sr * 1000
+        case .limiterRelMS: return st.pointee.releaseMS
         case .none: return 0
         }
     }
@@ -233,9 +241,14 @@ public final class SonoraDSPUnit: AUAudioUnit {
 
     public override func allocateRenderResources() throws {
         try super.allocateRenderResources()
-        state.pointee.sampleRate = Float(outBus.format.sampleRate)
+        let rate = Float(outBus.format.sampleRate)
+        state.pointee.sampleRate = rate > 0 ? rate : 48_000
         state.pointee.envelope = 0
         state.pointee.gain = 1
+        // The coefficient was built at init against the 48 kHz placeholder.
+        // Without this, the limiter releases ~9% off on 44.1 kHz material and
+        // is badly wrong at 96 kHz.
+        SonoraDSPUnit.refreshReleaseCoef(state)
     }
 
     public override func deallocateRenderResources() {
