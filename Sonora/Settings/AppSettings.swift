@@ -160,6 +160,10 @@ final class AppSettings: ObservableObject {
     @Published var trackSort: TrackSort { didSet { save(trackSort.rawValue, "trackSort") } }
     @Published var trackSortAscending: Bool { didSet { save(trackSortAscending, "trackSortAsc") } }
     @Published var minimumTrackSeconds: Double { didSet { save(minimumTrackSeconds, "minTrackSec") } }
+    /// Allow the artwork finder to query the iTunes Search API for covers it
+    /// cannot find on disk. This is the only thing in the app that touches the
+    /// network, which is why it gets its own switch.
+    @Published var downloadMissingArtwork: Bool { didSet { save(downloadMissingArtwork, "artDownload") } }
 
     // MARK: Appearance
 
@@ -255,6 +259,7 @@ final class AppSettings: ObservableObject {
         trackSort = TrackSort(rawValue: s("trackSort", "trackNumber")) ?? .trackNumber
         trackSortAscending = b("trackSortAsc", true)
         minimumTrackSeconds = n("minTrackSec", 0)
+        downloadMissingArtwork = b("artDownload", true)
 
         themeID = s("themeID", "ember")
         useAlbumArtColors = b("artColors", true)

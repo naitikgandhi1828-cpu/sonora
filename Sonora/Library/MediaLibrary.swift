@@ -258,6 +258,20 @@ final class MediaLibrary: ObservableObject {
         scheduleSave()
     }
 
+    /// Points every track of an album at a newly found cover.
+    ///
+    /// Artwork is stored per album key, so one lookup covers the whole record;
+    /// this is what makes the result visible in the library lists, which read
+    /// `artworkKey` off the tracks rather than off the store.
+    func setArtworkKey(_ key: String, forAlbumKey albumKey: String) {
+        var changed = false
+        for i in tracks.indices where tracks[i].albumKey == albumKey && tracks[i].artworkKey != key {
+            tracks[i].artworkKey = key
+            changed = true
+        }
+        if changed { scheduleSave() }
+    }
+
     func setMeasuredGain(_ gain: Float, peak: Float, for id: UUID) {
         guard let idx = trackIndex[id] else { return }
         if tracks[idx].replayGainTrack == nil { tracks[idx].replayGainTrack = gain }

@@ -11,6 +11,7 @@ struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var library: MediaLibrary
     @EnvironmentObject private var themes: ThemeManager
+    @EnvironmentObject private var artwork: ArtworkFinder
 
     @State private var showFolderPicker = false
     @State private var confirmWipe = false
@@ -23,6 +24,7 @@ struct SettingsView: View {
                 playbackSection
                 appearanceSection
                 librarySection
+                artworkSection
                 storageSection
                 aboutSection
             }
@@ -135,6 +137,43 @@ struct SettingsView: View {
         .tint(themes.accent)
     }
 
+    private var artworkSection: some View {
+        Section {
+            Toggle("Download missing artwork", isOn: $settings.downloadMissingArtwork)
+
+            Button {
+                Task { await artwork.findMissingArtwork() }
+            } label: {
+                HStack {
+                    Label("Find Missing Artwork", systemImage: "photo.on.rectangle.angled")
+                    Spacer()
+                    if artwork.isRunning { ProgressView() }
+                }
+            }
+            .disabled(artwork.isRunning || library.tracks.isEmpty)
+
+            if artwork.isRunning {
+                VStack(alignment: .leading, spacing: 4) {
+                    ProgressView(value: artwork.progress)
+                    Text(artwork.status)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Button("Stop", role: .cancel) { artwork.cancel() }
+            } else if !artwork.status.isEmpty {
+                Text(artwork.status)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Album Art")
+        } footer: {
+            Text("Sonora first looks for a cover image beside your files and for artwork tagged into another track of the same album. Only when that fails, and only with the switch above on, does it ask Apple's public iTunes Search catalogue — sending the artist and album name and nothing else. Turn it off to keep Sonora entirely offline.")
+        }
+        .tint(themes.accent)
+    }
+
     private var storageSection: some View {
         Section("Storage") {
             HStack {
@@ -156,7 +195,7 @@ struct SettingsView: View {
 
     private var aboutSection: some View {
         Section {
-            HStack { Text("Version"); Spacer(); Text("1.0").foregroundStyle(.secondary) }
+            HStack { Text("Version"); Spacer(); Text(Self.appVersion).foregroundStyle(.secondary) }
             HStack { Text("Tracks"); Spacer(); Text("\(library.tracks.count)").foregroundStyle(.secondary) }
             HStack { Text("Total time"); Spacer(); Text(library.totalDuration.longFormat).foregroundStyle(.secondary) }
         } header: {
@@ -164,6 +203,17 @@ struct SettingsView: View {
         } footer: {
             Text("Sonora plays the formats iOS can decode natively: MP3, AAC/M4A, ALAC, FLAC, WAV, AIFF and CAF. Formats like Opus, WMA, APE and DSD need a bundled decoder — see the project README.")
         }
+    }
+}
+
+extension SettingsView {
+    /// Read from the bundle rather than typed in, so it cannot drift away from
+    /// what the build actually shipped.
+    static var appVersion: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let short = (info["CFBundleShortVersionString"] as? String) ?? "—"
+        guard let build = info["CFBundleVersion"] as? String else { return short }
+        return "\(short) (\(build))"
     }
 }
 

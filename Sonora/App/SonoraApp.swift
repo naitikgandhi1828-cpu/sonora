@@ -15,6 +15,7 @@ struct SonoraApp: App {
     @StateObject private var library: MediaLibrary
     @StateObject private var player: PlaybackController
     @StateObject private var themes: ThemeManager
+    @StateObject private var artwork: ArtworkFinder
 
     @Environment(\.scenePhase) private var scenePhase
 
@@ -26,11 +27,14 @@ struct SonoraApp: App {
         let library = MediaLibrary(settings: settings)
         let player = PlaybackController(library: library, settings: settings)
         let themes = ThemeManager(settings: settings)
+        let artwork = ArtworkFinder(settings: settings, library: library)
+        player.artworkFinder = artwork
 
         _settings = StateObject(wrappedValue: settings)
         _library = StateObject(wrappedValue: library)
         _player = StateObject(wrappedValue: player)
         _themes = StateObject(wrappedValue: themes)
+        _artwork = StateObject(wrappedValue: artwork)
     }
 
     var body: some Scene {
@@ -40,6 +44,7 @@ struct SonoraApp: App {
                 .environmentObject(library)
                 .environmentObject(player)
                 .environmentObject(themes)
+                .environmentObject(artwork)
                 .task {
                     // Pick up anything the user dropped in through the Files app.
                     await library.importDocumentsFolder()

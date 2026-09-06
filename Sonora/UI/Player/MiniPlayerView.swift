@@ -13,7 +13,8 @@ struct MiniPlayerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SlimProgressBar(fraction: player.duration > 0 ? player.position / player.duration : 0)
+            SlimProgressBar(fraction: player.trackLength > 0
+                                      ? player.elapsed / player.trackLength : 0)
 
             HStack(spacing: 12) {
                 ArtworkView(key: player.currentTrack?.artworkKey, size: 42, cornerRadius: 7)
@@ -61,7 +62,7 @@ struct MiniPlayerView: View {
                 .onEnded { value in
                     if value.translation.height < -30 { showFullPlayer = true }
                     else if value.translation.width < -60 { player.next(userInitiated: true) }
-                    else if value.translation.width > 60 { player.previous() }
+                    else if value.translation.width > 60 { player.previous(allowRestart: false) }
                 }
         )
     }

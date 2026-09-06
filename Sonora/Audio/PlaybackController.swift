@@ -45,6 +45,20 @@ final class PlaybackController: ObservableObject {
 
     var dsp: DSPChain { engine.chain }
 
+    /// Set once by the app on launch. When it turns up a cover for whatever is
+    /// playing, refresh the current track so the player and the lock screen
+    /// show it straight away instead of on the next track change.
+    var artworkFinder: ArtworkFinder? {
+        didSet {
+            artworkFinder?.onArtworkFound = { [weak self] albumKey in
+                guard let self, let track = self.currentTrack,
+                      track.albumKey == albumKey else { return }
+                self.setCurrent(trackID: track.id)
+                self.refreshNowPlaying()
+            }
+        }
+    }
+
     // MARK: Init
 
     init(library: MediaLibrary, settings: AppSettings) {
@@ -119,9 +133,15 @@ final class PlaybackController: ObservableObject {
         center.onToggle = { [weak self] in self?.togglePlayPause() }
         center.onNext = { [weak self] in self?.next(userInitiated: true) }
         center.onPrevious = { [weak self] in self?.previous() }
-        center.onSeek = { [weak self] time in self?.seek(to: time) }
-        center.onSkipForward = { [weak self] i in self?.engine.skipForward(i) }
-        center.onSkipBackward = { [weak self] i in self?.engine.skipBackward(i) }
+        // The lock screen is told the track's own timeline, so the scrubber
+        // hands back a track-relative time and it has to be put back into the
+        // file's timeline before the engine sees it.
+        center.onSeek = { [weak self] time in
+            guard let self else { return }
+            self.seek(to: self.trackStart + time)
+        }
+        center.onSkipForward = { [weak self] i in self?.skip(by: i) }
+        center.onSkipBackward = { [weak self] i in self?.skip(by: -i) }
         center.onChangeRating = { [weak self] rating in
             guard let self, let id = self.currentTrack?.id else { return }
             self.library.setRating(rating, for: id)
@@ -318,9 +338,13 @@ final class PlaybackController: ObservableObject {
         startCurrent(autoplay: true)
     }
 
-    func previous() {
-        // Restart the track first, like every other player does.
-        if position > settings.rewindOnPrevSeconds {
+    /// - Parameter allowRestart: when true (the transport button) a right-hand
+    ///   press part-way through a track restarts it, the way every other player
+    ///   behaves. The artwork swipe passes false: the cover has already slid
+    ///   across to the previous album, so snapping back to the same song would
+    ///   contradict what the user just watched happen.
+    func previous(allowRestart: Bool = true) {
+        if allowRestart, elapsed > settings.rewindOnPrevSeconds {
             seek(to: currentTrack?.cueStart ?? 0)
             return
         }
@@ -341,10 +365,55 @@ final class PlaybackController: ObservableObject {
         startCurrent(autoplay: true)
     }
 
+    // MARK: - Track-relative position
+    //
+    // `position` and `duration` are positions *in the file*. For an ordinary
+    // file that is also the position in the track, but a cue-sheet track is a
+    // slice out of the middle of one long rip: the third track of a set might
+    // run from 12:40 to 17:05 of the file. Anything the listener sees - the
+    // seek bar, the timecodes, the mini player - has to work in the track's own
+    // timeline, which is what these three provide.
+
+    /// Where the current track starts inside its file.
+    var trackStart: TimeInterval { currentTrack?.cueStart ?? 0 }
+
+    /// Where it ends inside its file.
+    var trackEnd: TimeInterval {
+        max(trackStart + 0.01, currentTrack?.cueEnd ?? duration)
+    }
+
+    /// Length of the track itself.
+    var trackLength: TimeInterval { trackEnd - trackStart }
+
+    /// How far into the track we are.
+    var elapsed: TimeInterval {
+        min(max(0, position - trackStart), trackLength)
+    }
+
+    // MARK: - Queue neighbours (for the player's swipe transition)
+
+    var canGoNext: Bool { indexAfter(currentIndex, userInitiated: true) != nil }
+
+    var canGoPrevious: Bool {
+        guard !queue.isEmpty else { return false }
+        if settings.shuffleMode != .off, !shuffleHistory.isEmpty { return true }
+        return currentIndex > 0 || settings.repeatMode == .all
+    }
+
+    /// Artwork of the track `offset` places along the queue.
+    ///
+    /// Best effort by design: under shuffle the track that actually plays next
+    /// is not chosen until you get there, so this is what the swipe shows, not
+    /// a promise about what will play.
+    func artworkKey(offsetBy offset: Int) -> String? {
+        let index = currentIndex + offset
+        guard queue.indices.contains(index),
+              let track = library.track(id: queue[index]) else { return nil }
+        return track.artworkKey
+    }
+
     func seek(to time: TimeInterval) {
-        let lower = currentTrack?.cueStart ?? 0
-        let upper = max(lower, duration)
-        let clamped = max(lower, min(time, upper))
+        let clamped = max(trackStart, min(time, trackEnd))
         position = clamped
         engine.seek(to: clamped)
         refreshNowPlaying()
@@ -361,8 +430,15 @@ final class PlaybackController: ObservableObject {
         position = time
     }
 
-    func skipForward() { engine.skipForward(settings.seekStepSeconds) }
-    func skipBackward() { engine.skipBackward(settings.seekStepSeconds) }
+    func skipForward() { skip(by: settings.seekStepSeconds) }
+    func skipBackward() { skip(by: -settings.seekStepSeconds) }
+
+    /// Nudges the playhead, clamped to the track rather than to the file.
+    /// Skipping back off the front of a cue track used to land in the previous
+    /// track's audio while the UI still showed this one.
+    private func skip(by seconds: TimeInterval) {
+        seek(to: position + seconds)
+    }
 
     func cycleRepeat() { settings.repeatMode = settings.repeatMode.next }
     func cycleShuffle() { settings.shuffleMode = settings.shuffleMode.next }
@@ -392,6 +468,9 @@ final class PlaybackController: ObservableObject {
         currentTrack = track
         currentArtwork = ArtworkStore.shared.image(forKey: track.artworkKey)
         duration = track.duration
+        // Albums that came in without a cover get one looked up in the
+        // background the first time something from them plays.
+        artworkFinder?.findIfMissing(for: track)
     }
 
     private func itemForIndex(_ index: Int?) -> PlayableItem? {
@@ -541,8 +620,8 @@ final class PlaybackController: ObservableObject {
         lastNowPlayingUpdate = now
         NowPlayingCenter.shared.update(track: currentTrack,
                                        artwork: currentArtwork,
-                                       position: position,
-                                       duration: duration,
+                                       position: elapsed,
+                                       duration: trackLength,
                                        rate: isPlaying ? settings.playbackRate : 0,
                                        queueIndex: currentIndex >= 0 ? currentIndex : nil,
                                        queueCount: queue.isEmpty ? nil : queue.count)

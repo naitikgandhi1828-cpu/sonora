@@ -98,51 +98,65 @@ final class DSPChain {
 
     // MARK: - Settings binding
 
+    /// Subscribes to one setting and re-applies a section when it changes.
+    ///
+    /// The hop through the main queue is the whole point. `@Published` emits
+    /// from `willSet`, so a handler that reads the value back off `AppSettings`
+    /// sees the value it had *before* the change. Every handler below does
+    /// exactly that - `applyReverb()` reads `settings.reverbEnabled` - so each
+    /// toggle applied the state it had before you tapped it: switching the
+    /// reverb off left it running, and switching it on did nothing until some
+    /// later change came through. Delivering on the next main-queue turn lets
+    /// the property finish assigning first.
+    private func onChange<P: Publisher>(_ publisher: P,
+                                        _ apply: @escaping () -> Void) where P.Failure == Never {
+        publisher
+            .receive(on: DispatchQueue.main)
+            .sink { _ in apply() }
+            .store(in: &cancellables)
+    }
+
     private func observeSettings() {
         let s = settings
 
         // Equalizer
-        s.$eqEnabled.sink { [weak self] on in self?.applyEQ(enabled: on) }.store(in: &cancellables)
-        s.$eqBands.sink { [weak self] bands in self?.applyEQ(bands: bands) }.store(in: &cancellables)
-        s.$eqPreampDB.sink { [weak self] v in
-            guard let self else { return }
-            self.eq.globalGain = Float(max(-24, min(24, v)))
-        }.store(in: &cancellables)
+        onChange(s.$eqEnabled) { [weak self] in self?.applyEQ() }
+        onChange(s.$eqBands) { [weak self] in self?.applyEQ() }
+        onChange(s.$eqPreampDB) { [weak self] in self?.applyEQ() }
 
         // Tone
-        s.$toneEnabled.sink { [weak self] _ in self?.applyTone() }.store(in: &cancellables)
-        s.$bassDB.sink { [weak self] _ in self?.applyTone() }.store(in: &cancellables)
-        s.$trebleDB.sink { [weak self] _ in self?.applyTone() }.store(in: &cancellables)
-        s.$bassFrequency.sink { [weak self] _ in self?.applyTone() }.store(in: &cancellables)
-        s.$trebleFrequency.sink { [weak self] _ in self?.applyTone() }.store(in: &cancellables)
+        onChange(s.$toneEnabled) { [weak self] in self?.applyTone() }
+        onChange(s.$bassDB) { [weak self] in self?.applyTone() }
+        onChange(s.$trebleDB) { [weak self] in self?.applyTone() }
+        onChange(s.$bassFrequency) { [weak self] in self?.applyTone() }
+        onChange(s.$trebleFrequency) { [weak self] in self?.applyTone() }
 
         // Reverb
-        s.$reverbEnabled.sink { [weak self] _ in self?.applyReverb() }.store(in: &cancellables)
-        s.$reverbRoom.sink { [weak self] _ in self?.applyReverb() }.store(in: &cancellables)
-        s.$reverbMix.sink { [weak self] _ in self?.applyReverb() }.store(in: &cancellables)
-        s.$reverbDecay.sink { [weak self] _ in self?.applyReverb() }.store(in: &cancellables)
-        s.$reverbDamping.sink { [weak self] _ in self?.applyReverb() }.store(in: &cancellables)
-        s.$reverbPreDelay.sink { [weak self] _ in self?.applyReverb() }.store(in: &cancellables)
-        s.$reverbUseFreeverb.sink { [weak self] _ in self?.applyReverb() }.store(in: &cancellables)
+        onChange(s.$reverbEnabled) { [weak self] in self?.applyReverb() }
+        onChange(s.$reverbRoom) { [weak self] in self?.applyReverb() }
+        onChange(s.$reverbMix) { [weak self] in self?.applyReverb() }
+        onChange(s.$reverbDecay) { [weak self] in self?.applyReverb() }
+        onChange(s.$reverbDamping) { [weak self] in self?.applyReverb() }
+        onChange(s.$reverbPreDelay) { [weak self] in self?.applyReverb() }
+        onChange(s.$reverbUseFreeverb) { [weak self] in self?.applyReverb() }
 
         // Tempo / pitch
-        s.$playbackRate.sink { [weak self] _ in self?.applyTempo() }.store(in: &cancellables)
-        s.$pitchCents.sink { [weak self] _ in self?.applyTempo() }.store(in: &cancellables)
-        s.$tempoPitchLinked.sink { [weak self] _ in self?.applyTempo() }.store(in: &cancellables)
+        onChange(s.$playbackRate) { [weak self] in self?.applyTempo() }
+        onChange(s.$pitchCents) { [weak self] in self?.applyTempo() }
+        onChange(s.$tempoPitchLinked) { [weak self] in self?.applyTempo() }
 
         // Master DSP
-        s.$masterPreampDB.sink { [weak self] _ in self?.applyMasterDSP() }.store(in: &cancellables)
-        s.$stereoWidth.sink { [weak self] _ in self?.applyMasterDSP() }.store(in: &cancellables)
-        s.$balance.sink { [weak self] _ in self?.applyMasterDSP() }.store(in: &cancellables)
-        s.$monoDownmix.sink { [weak self] _ in self?.applyMasterDSP() }.store(in: &cancellables)
-        s.$limiterEnabled.sink { [weak self] _ in self?.applyMasterDSP() }.store(in: &cancellables)
-        s.$limiterThresholdDB.sink { [weak self] _ in self?.applyMasterDSP() }.store(in: &cancellables)
-        s.$limiterReleaseMS.sink { [weak self] _ in self?.applyMasterDSP() }.store(in: &cancellables)
+        onChange(s.$masterPreampDB) { [weak self] in self?.applyMasterDSP() }
+        onChange(s.$stereoWidth) { [weak self] in self?.applyMasterDSP() }
+        onChange(s.$balance) { [weak self] in self?.applyMasterDSP() }
+        onChange(s.$monoDownmix) { [weak self] in self?.applyMasterDSP() }
+        onChange(s.$limiterEnabled) { [weak self] in self?.applyMasterDSP() }
+        onChange(s.$limiterThresholdDB) { [weak self] in self?.applyMasterDSP() }
+        onChange(s.$limiterReleaseMS) { [weak self] in self?.applyMasterDSP() }
     }
 
     func applyAll() {
-        applyEQ(enabled: settings.eqEnabled, bands: settings.eqBands)
-        eq.globalGain = Float(settings.eqPreampDB)
+        applyEQ()
         applyTone()
         applyReverb()
         applyTempo()
@@ -151,16 +165,26 @@ final class DSPChain {
 
     // MARK: - Apply
 
-    private func applyEQ(enabled: Bool? = nil, bands: [EQBand]? = nil) {
-        let on = enabled ?? settings.eqEnabled
-        let model = bands ?? settings.eqBands
+    /// Off has to mean off through every switch the unit exposes.
+    ///
+    /// `AVAudioUnitEQ` offers three independent ways to silence itself - the
+    /// unit's `bypass`, each band's `bypass`, and the gains - and how faithfully
+    /// `bypass` is honoured is not something to lean on. `globalGain` in
+    /// particular is a unit-level property rather than a band, and it used to be
+    /// written from its own subscription with no regard for whether the EQ was
+    /// enabled, so the pre-amp stayed in circuit after the user switched the
+    /// equalizer off. Flattening the gains as well as setting both bypasses
+    /// costs nothing and leaves the EQ no route to keep colouring the sound.
+    private func applyEQ() {
+        let on = settings.eqEnabled
         eq.bypass = !on
-        for (i, band) in model.enumerated() where i < eq.bands.count {
+        eq.globalGain = on ? Float(max(-24, min(24, settings.eqPreampDB))) : 0
+        for (i, band) in settings.eqBands.enumerated() where i < eq.bands.count {
             let node = eq.bands[i]
             node.filterType = band.type.avFilterType
             node.frequency = max(20, min(Float(20_000), band.frequency))
             node.bandwidth = max(0.05, min(5.0, band.bandwidth))
-            node.gain = max(-24, min(24, band.gain))
+            node.gain = on ? max(-24, min(24, band.gain)) : 0
             node.bypass = band.bypass || !on
         }
     }
@@ -168,11 +192,12 @@ final class DSPChain {
     private func applyTone() {
         let on = settings.toneEnabled
         tone.bypass = !on
+        tone.globalGain = 0
         tone.bands[0].frequency = Float(max(20, min(500, settings.bassFrequency)))
-        tone.bands[0].gain = Float(max(-18, min(18, settings.bassDB)))
+        tone.bands[0].gain = on ? Float(max(-18, min(18, settings.bassDB))) : 0
         tone.bands[0].bypass = !on
         tone.bands[1].frequency = Float(max(1000, min(16_000, settings.trebleFrequency)))
-        tone.bands[1].gain = Float(max(-18, min(18, settings.trebleDB)))
+        tone.bands[1].gain = on ? Float(max(-18, min(18, settings.trebleDB))) : 0
         tone.bands[1].bypass = !on
     }
 
@@ -185,7 +210,16 @@ final class DSPChain {
         reverb.setBypassed(!on || useFreeverb)
         freeverb?.bypass = !on || !useFreeverb
 
-        guard on else { return }
+        guard on else {
+            // Belt and braces, for the same reason as the EQ: an effect that is
+            // bypassed but still holds a wet mix will be heard the moment the
+            // bypass is not honoured, and the tail already sitting in its delay
+            // lines has to be wound down either way. Driving both engines fully
+            // dry is what makes "off" audibly off.
+            reverb.setMix(0)
+            setFreeverb(.mix, 0)
+            return
+        }
 
         if useFreeverb {
             applyFreeverb()
@@ -198,12 +232,13 @@ final class DSPChain {
         }
     }
 
+    private func setFreeverb(_ addr: FreeverbParam, _ value: Float) {
+        freeverb?.auAudioUnit.parameterTree?.parameter(withAddress: addr.rawValue)?.value = value
+    }
+
     private func applyFreeverb() {
-        guard let freeverb else { return }
-        let tree = freeverb.auAudioUnit.parameterTree
-        func set(_ addr: FreeverbParam, _ value: Float) {
-            tree?.parameter(withAddress: addr.rawValue)?.value = value
-        }
+        guard freeverb != nil else { return }
+        let set = setFreeverb
 
         // The room preset supplies a nominal decay and the slider scales it,
         // exactly as on the AUReverb2 path, so switching engines keeps the

@@ -46,20 +46,31 @@ struct NowPlayingView: View {
     private var background: some View {
         ZStack {
             themes.theme.background
+
+            // A wash of the cover's own colour under the blur. The blur alone
+            // went grey on anything busy; the tint is what carries the album's
+            // character down the whole screen.
             if settings.blurredArtBackground, let art = player.currentArtwork {
                 Image(uiImage: art)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
-                    .blur(radius: 70, opaque: true)
-                    .overlay(themes.theme.background.opacity(themes.theme.isDark ? 0.62 : 0.78))
+                    .blur(radius: 80, opaque: true)
+                    .overlay(themes.theme.background.opacity(themes.theme.isDark ? 0.58 : 0.74))
                     .ignoresSafeArea()
                     .transition(.opacity)
             }
-            LinearGradient(colors: [.clear, themes.theme.background.opacity(0.85)],
+
+            LinearGradient(colors: [themes.accent.opacity(themes.theme.isDark ? 0.22 : 0.14),
+                                    .clear],
+                           startPoint: .top, endPoint: .center)
+                .ignoresSafeArea()
+
+            LinearGradient(colors: [.clear, themes.theme.background.opacity(0.9)],
                            startPoint: .center, endPoint: .bottom)
                 .ignoresSafeArea()
         }
-        .animation(.easeInOut(duration: 0.4), value: player.currentArtwork)
+        .animation(.easeInOut(duration: 0.45), value: player.currentArtwork)
+        .animation(.easeInOut(duration: 0.45), value: themes.accent)
     }
 
     // MARK: Content
@@ -136,12 +147,14 @@ struct NowPlayingView: View {
         GeometryReader { geo in
             let side = min(geo.size.width, geo.size.height)
             ZStack {
-                ArtworkView(key: track?.artworkKey,
-                            size: side,
-                            cornerRadius: 18,
-                            useThumbnail: false,
-                            fallbackSymbol: "music.quarternote.3")
-                    .shadow(color: .black.opacity(0.45), radius: 26, y: 14)
+                ArtworkPager(previousKey: player.artworkKey(offsetBy: -1),
+                             currentKey: track?.artworkKey,
+                             nextKey: player.artworkKey(offsetBy: 1),
+                             side: side,
+                             hasPrevious: player.canGoPrevious,
+                             hasNext: player.canGoNext,
+                             onPrevious: { player.previous(allowRestart: false) },
+                             onNext: { player.next(userInitiated: true) })
 
                 if settings.showVisualizer && player.isPlaying {
                     SpectrumView(meters: player.meters)
@@ -158,28 +171,18 @@ struct NowPlayingView: View {
         .aspectRatio(1, contentMode: .fit)
         .frame(maxHeight: 380)
         .onTapGesture(count: 2) { player.togglePlayPause(); Haptics.tap() }
-        // Swipe the artwork to change track. Attached here rather than to the
-        // whole screen so it can never be confused with scrubbing the seek bar
-        // underneath, and `simultaneousGesture` leaves vertical scrolling and
-        // sheet dismissal working — the handler ignores anything that is not
-        // clearly a horizontal flick.
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 30)
-                .onEnded { value in
-                    let dx = value.translation.width
-                    let dy = value.translation.height
-                    guard abs(dx) > 60, abs(dx) > abs(dy) * 1.5 else { return }
-                    if dx < 0 {
-                        player.next(userInitiated: true)
-                    } else {
-                        player.previous()
-                    }
-                    Haptics.tap()
-                }
-        )
     }
 
     private var titleBlock: some View {
+        titleContent
+            // Crossfade the text on a track change so it settles with the
+            // artwork instead of snapping a beat ahead of it.
+            .id(track?.id)
+            .transition(.opacity.combined(with: .offset(y: 6)))
+            .animation(.easeInOut(duration: 0.28), value: track?.id)
+    }
+
+    private var titleContent: some View {
         VStack(spacing: 6) {
             Text(track?.displayTitle ?? "Nothing playing")
                 .font(.system(size: 22, weight: .bold))
@@ -217,6 +220,12 @@ struct NowPlayingView: View {
                 if settings.showWaveformSeekBar {
                     WaveformSeekBar(trackID: track?.id,
                                     url: track.flatMap { library.url(for: $0) },
+                                    // Analysis range and display range are the
+                                    // same thing: the track's own extent. Left
+                                    // nil for ordinary files so the analyser
+                                    // reads to the end of the file rather than
+                                    // to a duration that may not have arrived
+                                    // from the engine yet.
                                     startTime: track?.cueStart ?? 0,
                                     endTime: track?.cueEnd,
                                     position: player.position,
@@ -226,10 +235,12 @@ struct NowPlayingView: View {
                                     onScrubEnded: { player.endScrub(at: $0) })
                         .frame(height: 52)
                 } else {
+                    // The plain slider works in track time too, so both bars
+                    // behave identically on cue-sheet tracks.
                     Slider(value: Binding(
-                        get: { min(player.position, max(player.duration, 0.01)) },
-                        set: { player.scrubPreview($0) }
-                    ), in: 0...max(player.duration, 0.01), onEditingChanged: { editing in
+                        get: { min(player.elapsed, max(player.trackLength, 0.01)) },
+                        set: { player.scrubPreview(player.trackStart + $0) }
+                    ), in: 0...max(player.trackLength, 0.01), onEditingChanged: { editing in
                         if editing { player.beginScrub() } else { player.endScrub(at: player.position) }
                     })
                     .tint(themes.accent)
@@ -238,9 +249,9 @@ struct NowPlayingView: View {
             }
 
             HStack {
-                Text(player.position.timecode)
+                Text(player.elapsed.timecode)
                 Spacer()
-                Text("-" + max(0, player.duration - player.position).timecode)
+                Text("-" + max(0, player.trackLength - player.elapsed).timecode)
             }
             .font(.system(size: 11, design: .monospaced))
             .foregroundStyle(themes.theme.textSecondary)
@@ -287,6 +298,16 @@ struct NowPlayingView: View {
     }
 
     private var secondaryRow: some View {
+        secondaryButtons
+            .padding(.vertical, 10)
+            .padding(.horizontal, 20)
+            .background(themes.theme.surface.opacity(0.55),
+                        in: Capsule(style: .continuous))
+            .overlay(Capsule(style: .continuous)
+                .stroke(themes.theme.separator.opacity(0.5), lineWidth: 0.5))
+    }
+
+    private var secondaryButtons: some View {
         HStack(spacing: 26) {
             Button { player.skipBackward(); Haptics.tap() } label: {
                 Label("\(Int(settings.seekStepSeconds))", systemImage: "gobackward")
@@ -334,6 +355,111 @@ struct NowPlayingView: View {
         .font(.system(size: 10, weight: .medium))
         .foregroundStyle(themes.theme.textSecondary.opacity(0.85))
         .frame(height: 16)
+    }
+}
+
+// MARK: - Swipeable artwork
+
+/// Album art you can swipe through, one track per swipe.
+///
+/// The neighbouring covers are laid out either side of the current one and the
+/// whole strip follows the finger, so a swipe reads as travelling through the
+/// queue rather than as a button press that happens to change the song. They
+/// stay invisible at rest and fade in as the drag opens a gap, which keeps the
+/// screen calm when nobody is touching it.
+///
+/// The track only changes once the settle animation has finished. Changing it
+/// on release instead would swap the picture out from under a strip that is
+/// still moving, and the transition would tear.
+private struct ArtworkPager: View {
+
+    let previousKey: String?
+    let currentKey: String?
+    let nextKey: String?
+    let side: CGFloat
+    let hasPrevious: Bool
+    let hasNext: Bool
+    let onPrevious: () -> Void
+    let onNext: () -> Void
+
+    @State private var dragX: CGFloat = 0
+    @State private var isSettling = false
+
+    private var gap: CGFloat { max(18, side * 0.08) }
+    private var step: CGFloat { side + gap }
+
+    /// Neighbours fade in with the drag rather than sitting there all the time.
+    private var neighbourOpacity: Double {
+        Double(min(1, abs(dragX) / (step * 0.5)))
+    }
+
+    private var centreOpacity: Double {
+        1 - 0.3 * Double(min(1, abs(dragX) / step))
+    }
+
+    var body: some View {
+        HStack(spacing: gap) {
+            cover(previousKey).opacity(neighbourOpacity)
+            cover(currentKey).opacity(centreOpacity)
+            cover(nextKey).opacity(neighbourOpacity)
+        }
+        .offset(x: dragX)
+        // The strip is three covers wide; this frame crops the view back to one
+        // and centres it, so the neighbours sit just off screen at rest.
+        .frame(width: side, height: side)
+        .contentShape(Rectangle())
+        .simultaneousGesture(drag)
+    }
+
+    private func cover(_ key: String?) -> some View {
+        ArtworkView(key: key,
+                    size: side,
+                    cornerRadius: side * 0.055,
+                    useThumbnail: false,
+                    fallbackSymbol: "music.quarternote.3")
+            .shadow(color: .black.opacity(0.45), radius: 26, y: 14)
+    }
+
+    private var drag: some Gesture {
+        DragGesture(minimumDistance: 16)
+            .onChanged { value in
+                guard !isSettling else { return }
+                // Ignore anything that is really a vertical gesture, so pulling
+                // the player down to dismiss it still works.
+                guard abs(value.translation.width) > abs(value.translation.height) else { return }
+
+                let raw = value.translation.width
+                let atEnd = (raw < 0 && !hasNext) || (raw > 0 && !hasPrevious)
+                // Rubber-band at the ends of the queue: it still moves, so the
+                // gesture feels alive, but it clearly refuses to go anywhere.
+                dragX = atEnd ? raw * 0.2 : raw
+            }
+            .onEnded { value in
+                guard !isSettling else { return }
+
+                let travelled = value.translation.width
+                let flick = value.predictedEndTranslation.width
+                let threshold = side * 0.26
+                let goNext = hasNext && (travelled < -threshold || flick < -side)
+                let goPrevious = hasPrevious && (travelled > threshold || flick > side)
+
+                guard goNext || goPrevious else {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) { dragX = 0 }
+                    return
+                }
+
+                isSettling = true
+                Haptics.tap()
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                    dragX = goNext ? -step : step
+                } completion: {
+                    // Snap back and change track in the same update, so the
+                    // incoming cover simply becomes the centre one.
+                    dragX = 0
+                    isSettling = false
+                    if goNext { onNext() } else { onPrevious() }
+                }
+            }
     }
 }
 

@@ -132,6 +132,31 @@ enum MetadataReader {
         return FileInfo(track: track, artwork: artworkData)
     }
 
+    /// Loads only the embedded picture from a file.
+    ///
+    /// `read(url:rootID:relativePath:)` would do this too, but it also decodes
+    /// duration and every tag, and the artwork finder may walk a dozen files
+    /// looking for one that carries a cover.
+    static func artworkData(at url: URL) async -> Data? {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+
+        let asset = AVURLAsset(url: url)
+        let formats = (try? await asset.load(.availableMetadataFormats)) ?? []
+        var items: [AVMetadataItem] = (try? await asset.load(.metadata)) ?? []
+        for format in formats {
+            let more = (try? await asset.loadMetadata(for: format)) ?? []
+            items.append(contentsOf: more)
+        }
+
+        for item in items where normalizedKey(for: item) == "artwork" {
+            guard let value = (try? await item.load(.value)) ?? nil else { continue }
+            if let data = value as? Data { return data }
+            if let image = value as? UIImage { return image.jpegData(compressionQuality: 0.9) }
+        }
+        return nil
+    }
+
     // MARK: - Helpers
 
     private static func normalizedKey(for item: AVMetadataItem) -> String {

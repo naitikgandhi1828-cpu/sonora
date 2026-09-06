@@ -93,6 +93,29 @@ final class PlaybackEngine {
     /// the next song.
     private var awaitingFirstRender = false
 
+    /// Every scheduled segment gets an id, and only ids still in this set are
+    /// allowed to report completion.
+    ///
+    /// `AVAudioPlayerNode.scheduleSegment` calls its completion handler when the
+    /// segment finishes **or when the node is stopped**. Seeking stops the node
+    /// and reschedules, so the abandoned schedule's handler fired a moment
+    /// later, hopped to the main queue, and by then `segments.last` was the
+    /// freshly seeked segment - same track id - so `segmentFinished` read it as
+    /// "everything scheduled has played" and advanced to the next song. Tapping
+    /// the seek bar therefore changed track instead of moving the playhead.
+    private var liveScheduleIDs: Set<Int> = []
+    private var nextScheduleID = 0
+    /// Id of the segment on the incoming crossfade player, which has to survive
+    /// the outgoing player being stopped.
+    private var crossfadeScheduleID: Int?
+
+    /// Registers a new schedule and returns its id.
+    private func newScheduleID() -> Int {
+        nextScheduleID += 1
+        liveScheduleIDs.insert(nextScheduleID)
+        return nextScheduleID
+    }
+
     // MARK: Callbacks (set by PlaybackController)
 
     /// The engine crossed into a different scheduled segment.
@@ -260,6 +283,9 @@ final class PlaybackEngine {
         pendingCrossfadeItem = nil
         chainedItem = nil
         segments.removeAll()
+        // Anything the previous schedule still has in flight is meaningless now.
+        liveScheduleIDs.removeAll()
+        crossfadeScheduleID = nil
         nextScheduleFrame = 0
         awaitingFirstRender = true
         openFiles = [item.trackID: file]
@@ -309,12 +335,16 @@ final class PlaybackEngine {
         nextScheduleFrame += frames
 
         let node = player
+        let scheduleID = newScheduleID()
         node.scheduleSegment(file,
                              startingFrame: startFrame,
                              frameCount: AVAudioFrameCount(frames),
                              at: nil,
                              completionCallbackType: .dataPlayedBack) { [weak self] _ in
-            DispatchQueue.main.async { self?.segmentFinished(trackID: segment.trackID) }
+            DispatchQueue.main.async {
+                guard let self, self.liveScheduleIDs.remove(scheduleID) != nil else { return }
+                self.segmentFinished(trackID: segment.trackID)
+            }
         }
         return true
     }
@@ -397,6 +427,8 @@ final class PlaybackEngine {
         playerA.stop()
         playerB.stop()
         segments.removeAll()
+        liveScheduleIDs.removeAll()
+        crossfadeScheduleID = nil
         nextScheduleFrame = 0
         currentItem = nil
         chainedItem = nil
@@ -408,8 +440,12 @@ final class PlaybackEngine {
         guard var item = currentItem else { return }
         let wasPlaying = isPlaying
         // `startTime` doubles as the resume offset inside the file, so a cue
-        // track can never be seeked in front of its own start point.
-        item.startTime = max(0, time)
+        // track can never be seeked in front of its own start point. Keep at
+        // least a moment of audio ahead of the playhead too: landing on (or
+        // past) the end leaves zero frames to schedule, and `load` would bail
+        // out with nothing playing at all.
+        let ceiling = (item.endTime ?? currentDuration) - 0.25
+        item.startTime = max(0, min(time, max(0, ceiling)))
         chainedItem = nil
         load(item: item, autoplay: wasPlaying)
     }
@@ -435,12 +471,17 @@ final class PlaybackEngine {
 
         openFiles[item.trackID] = file
         targetMixer.volume = 0
+        let scheduleID = newScheduleID()
+        crossfadeScheduleID = scheduleID
         target.scheduleSegment(file,
                                startingFrame: startFrame,
                                frameCount: AVAudioFrameCount(frames),
                                at: nil,
                                completionCallbackType: .dataPlayedBack) { [weak self] _ in
-            DispatchQueue.main.async { self?.onFinished?() }
+            DispatchQueue.main.async {
+                guard let self, self.liveScheduleIDs.remove(scheduleID) != nil else { return }
+                self.onFinished?()
+            }
         }
         ensureEngineRunning()
         target.play()
@@ -459,6 +500,11 @@ final class PlaybackEngine {
         idleGain.volume = gainLinear(incoming.gainDB) * inGain
 
         if t >= 1 {
+            // Stopping the outgoing player fires its completion handler; retire
+            // its schedule first so that callback cannot be mistaken for the end
+            // of the queue. The incoming segment's id stays live.
+            liveScheduleIDs = crossfadeScheduleID.map { [$0] } ?? []
+            crossfadeScheduleID = nil
             player.stop()
             openFiles.removeValue(forKey: currentItem?.trackID ?? UUID())
             usingA.toggle()

@@ -26,10 +26,26 @@ struct WaveformSeekBar: View {
     @State private var isScrubbing = false
     @State private var scrubFraction: Double = 0
 
+    /// The bar works in the track's own time, not the file's.
+    ///
+    /// `position` and `duration` are both file-absolute, which is the same
+    /// thing for an ordinary file but not for a cue-sheet track: one starting
+    /// ten minutes into a rip arrived here as position 600 of duration 640, so
+    /// the playhead sat pinned near the right-hand end and the whole left of the
+    /// bar mapped to times before the track had begun. Anchoring to
+    /// [start, end] makes a cue track scrub across its full width, and leaves
+    /// ordinary files exactly as they were (start 0, end = duration).
+    private var lowerBound: TimeInterval { max(0, startTime) }
+    private var upperBound: TimeInterval { max(lowerBound + 0.01, endTime ?? duration) }
+    private var span: TimeInterval { upperBound - lowerBound }
+
+    private func time(atFraction f: Double) -> TimeInterval {
+        lowerBound + min(1, max(0, f)) * span
+    }
+
     private var fraction: Double {
         if isScrubbing { return scrubFraction }
-        guard duration > 0 else { return 0 }
-        return min(1, max(0, position / duration))
+        return min(1, max(0, (position - lowerBound) / span))
     }
 
     var body: some View {
@@ -53,13 +69,17 @@ struct WaveformSeekBar: View {
                         .frame(maxHeight: .infinity, alignment: .center)
                 }
 
-                // Playhead
+                // Playhead. `position` only publishes ten times a second, which
+                // reads as a stutter at this size, so interpolate between
+                // updates - but never while the finger is down, where the
+                // playhead has to track the touch exactly.
                 Rectangle()
                     .fill(themes.theme.textPrimary)
                     .frame(width: 2, height: height)
                     .offset(x: max(0, min(width - 2, width * fraction)))
                     .opacity(isScrubbing ? 1 : 0.75)
                     .shadow(color: .black.opacity(0.4), radius: 2)
+                    .animation(isScrubbing ? nil : .linear(duration: 0.1), value: fraction)
             }
             .contentShape(Rectangle())
             .gesture(
@@ -71,12 +91,13 @@ struct WaveformSeekBar: View {
                             Haptics.tap()
                         }
                         scrubFraction = min(1, max(0, value.location.x / max(1, width)))
-                        onScrubChanged(scrubFraction * duration)
+                        onScrubChanged(time(atFraction: scrubFraction))
                     }
                     .onEnded { value in
                         let f = min(1, max(0, value.location.x / max(1, width)))
+                        scrubFraction = f
                         isScrubbing = false
-                        onScrubEnded(f * duration)
+                        onScrubEnded(time(atFraction: f))
                     }
             )
         }
