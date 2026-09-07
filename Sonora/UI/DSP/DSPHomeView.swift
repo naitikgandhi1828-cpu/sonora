@@ -63,6 +63,7 @@ struct EffectsRackView: View {
             VStack(spacing: 16) {
                 toneCard
                 reverbCard
+                if player.dsp.spatial != nil { spatialCard }
                 tempoCard
                 stereoCard
             }
@@ -160,6 +161,52 @@ struct EffectsRackView: View {
     }
 
     // MARK: Tempo
+
+    // MARK: Spatial
+
+    private var spatialCard: some View {
+        card(title: "Spatial", symbol: "airpodspro", isOn: $settings.spatialEnabled) {
+            Text("Models listening to speakers in a room: each channel reaches the far ear late and dulled, with early reflections around it. Built for headphones — on the phone's own speaker there is nothing to place.")
+                .font(.system(size: 11))
+                .foregroundStyle(themes.theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 8)], spacing: 8) {
+                ForEach(AppSettings.SpatialPreset.allCases) { preset in
+                    Button {
+                        settings.applySpatialPreset(preset)
+                        settings.spatialEnabled = true
+                        Haptics.select()
+                    } label: {
+                        Text(preset.rawValue)
+                            .font(.system(size: 12))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(themes.theme.surfaceElevated,
+                                        in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .foregroundStyle(themes.theme.textPrimary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            LabeledSlider(title: "Amount", value: $settings.spatialAmount, range: 0...100,
+                          format: { String(format: "%.0f%%", $0) },
+                          onReset: { settings.spatialAmount = 60 })
+            LabeledSlider(title: "Width", value: $settings.spatialWidth, range: 0...2,
+                          format: { String(format: "%.0f%%", $0 * 100) },
+                          onReset: { settings.spatialWidth = 1.25 })
+            LabeledSlider(title: "Crossfeed", value: $settings.spatialCrossfeed, range: 0...100,
+                          format: { String(format: "%.0f%%", $0) },
+                          onReset: { settings.spatialCrossfeed = 45 })
+            LabeledSlider(title: "Room Depth", value: $settings.spatialDepth, range: 0...100,
+                          format: { String(format: "%.0f%%", $0) },
+                          onReset: { settings.spatialDepth = 40 })
+            LabeledSlider(title: "Height", value: $settings.spatialElevation, range: 0...100,
+                          format: { String(format: "%.0f%%", $0) },
+                          onReset: { settings.spatialElevation = 35 })
+        }
+    }
 
     private var tempoCard: some View {
         VStack(alignment: .leading, spacing: 12) {

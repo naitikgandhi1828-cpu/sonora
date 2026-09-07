@@ -141,6 +141,17 @@ final class AppSettings: ObservableObject {
     /// true = Freeverb (Schroeder-Moorer), false = Apple AUReverb2.
     @Published var reverbUseFreeverb: Bool { didSet { save(reverbUseFreeverb, "revFv") } }
 
+    // MARK: Spatial
+
+    /// Binaural spatialiser. Not Dolby Atmos and never described as such —
+    /// see SpatialUnit for why that is not a thing an offline player can do.
+    @Published var spatialEnabled: Bool { didSet { save(spatialEnabled, "spOn") } }
+    @Published var spatialAmount: Double { didSet { save(spatialAmount, "spAmt") } }       // 0...100 %
+    @Published var spatialWidth: Double { didSet { save(spatialWidth, "spWidth") } }       // 0...2
+    @Published var spatialCrossfeed: Double { didSet { save(spatialCrossfeed, "spXf") } }  // 0...100 %
+    @Published var spatialDepth: Double { didSet { save(spatialDepth, "spDepth") } }       // 0...100 %
+    @Published var spatialElevation: Double { didSet { save(spatialElevation, "spElev") } }// 0...100 %
+
     // MARK: Stereo / limiter
 
     @Published var stereoWidth: Double { didSet { save(stereoWidth, "width") } }        // 0...2
@@ -244,6 +255,13 @@ final class AppSettings: ObservableObject {
         reverbUseAdvanced = b("revAdv", true)
         reverbUseFreeverb = b("revFv", true)
 
+        spatialEnabled = b("spOn", false)
+        spatialAmount = n("spAmt", 60)
+        spatialWidth = n("spWidth", 1.25)
+        spatialCrossfeed = n("spXf", 45)
+        spatialDepth = n("spDepth", 40)
+        spatialElevation = n("spElev", 35)
+
         stereoWidth = n("width", 1.0)
         balance = n("balance", 0)
         monoDownmix = b("mono", false)
@@ -322,7 +340,39 @@ final class AppSettings: ObservableObject {
         bassDB = 0; trebleDB = 0; toneEnabled = false
         stereoWidth = 1; balance = 0; monoDownmix = false
         reverbEnabled = false; reverbMix = 35
+        spatialEnabled = false
+        applySpatialPreset(.headphones)
         playbackRate = 1; pitchCents = 0
         masterPreampDB = 0
+    }
+
+    // MARK: - Spatial presets
+
+    enum SpatialPreset: String, CaseIterable, Identifiable {
+        case subtle = "Subtle"
+        case headphones = "Headphones"
+        case wide = "Wide"
+        case concert = "Concert Hall"
+
+        var id: String { rawValue }
+
+        /// amount, width, crossfeed, depth, elevation
+        var values: (Double, Double, Double, Double, Double) {
+            switch self {
+            case .subtle:     return (35, 1.10, 35, 20, 15)
+            case .headphones: return (55, 1.15, 55, 30, 25)
+            case .wide:       return (70, 1.60, 40, 45, 35)
+            case .concert:    return (85, 1.40, 45, 75, 45)
+            }
+        }
+    }
+
+    func applySpatialPreset(_ preset: SpatialPreset) {
+        let v = preset.values
+        spatialAmount = v.0
+        spatialWidth = v.1
+        spatialCrossfeed = v.2
+        spatialDepth = v.3
+        spatialElevation = v.4
     }
 }

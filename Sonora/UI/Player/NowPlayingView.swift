@@ -358,6 +358,9 @@ struct NowPlayingView: View {
             if settings.reverbEnabled {
                 Label(settings.reverbRoom.label, systemImage: "square.stack.3d.down.right")
             }
+            if settings.spatialEnabled {
+                Label("Spatial", systemImage: "airpodspro")
+            }
             if settings.replayGainMode != .off {
                 Label("RG", systemImage: "speaker.wave.2.circle")
             }

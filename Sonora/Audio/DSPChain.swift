@@ -7,14 +7,20 @@
 //  Signal flow:
 //
 //    playerA ─┐
-//             ├─▶ sourceMixer ─▶ EQ ─▶ Tone ─▶ Freeverb ─▶ Reverb2 ─▶ TimePitch ─▶ SonoraDSP ─▶ out
-//    playerB ─┘   (crossfade,      (10-band  (bass/   (custom)    (Apple)     (rate/      (pre-amp,
-//                  replay gain)    parametric) treble)                         pitch)      width,
-//                                                                                          balance,
-//                                                                                          limiter)
+//             ├─▶ sourceMixer ─▶ EQ ─▶ Tone ─▶ Freeverb ─▶ Reverb2 ─▶ Spatial
+//    playerB ─┘   (crossfade,     (10-band   (bass/   (custom)    (Apple)    (binaural
+//                  replay gain)   parametric) treble)                         widener)
+//
+//                                          ─▶ TimePitch ─▶ SonoraDSP ─▶ out
+//                                             (rate/       (pre-amp, width,
+//                                              pitch)       balance, limiter)
 //
 //  The two reverb nodes are mutually exclusive: whichever engine the user has
 //  not selected is bypassed, so only one is ever in circuit.
+//
+//  Spatial sits after the reverbs so the tail gets widened along with the dry
+//  signal, and before the master stage so the limiter still has the last word
+//  on what leaves the app.
 //
 
 import Foundation
@@ -30,6 +36,9 @@ final class DSPChain {
     /// Both stay wired into the graph and the unused one is bypassed, so
     /// switching engines costs nothing and never needs a graph rebuild.
     let freeverb: AVAudioUnitEffect?
+    /// Binaural spatialiser. Nil if the component failed to register, in which
+    /// case the feature simply does not appear in the UI.
+    let spatial: AVAudioUnitEffect?
     let timePitch: AVAudioUnitTimePitch
     let dsp: AVAudioUnitEffect?
 
@@ -41,6 +50,7 @@ final class DSPChain {
         var nodes: [AVAudioNode] = [eq, tone]
         if let freeverb { nodes.append(freeverb) }
         nodes.append(reverb.node)
+        if let spatial { nodes.append(spatial) }
         nodes.append(timePitch)
         if let dsp { nodes.append(dsp) }
         return nodes
@@ -62,6 +72,14 @@ final class DSPChain {
             freeverb = nil
         }
 
+        SpatialUnit.registerIfNeeded()
+        if AudioComponentFindNext(nil, &DSPChain.spatialDesc) != nil {
+            spatial = AVAudioUnitEffect(audioComponentDescription: SpatialUnit.componentDescription)
+        } else {
+            print("[DSPChain] Spatial unit unavailable")
+            spatial = nil
+        }
+
         SonoraDSPUnit.registerIfNeeded()
         if AudioComponentFindNext(nil, &DSPChain.sonoraDesc) != nil {
             dsp = AVAudioUnitEffect(audioComponentDescription: SonoraDSPUnit.componentDescription)
@@ -77,6 +95,7 @@ final class DSPChain {
 
     private static var sonoraDesc = SonoraDSPUnit.componentDescription
     private static var freeverbDesc = FreeverbUnit.componentDescription
+    private static var spatialDesc = SpatialUnit.componentDescription
 
     // MARK: - Setup
 
@@ -140,6 +159,14 @@ final class DSPChain {
         onChange(s.$reverbPreDelay) { [weak self] in self?.applyReverb() }
         onChange(s.$reverbUseFreeverb) { [weak self] in self?.applyReverb() }
 
+        // Spatial
+        onChange(s.$spatialEnabled) { [weak self] in self?.applySpatial() }
+        onChange(s.$spatialAmount) { [weak self] in self?.applySpatial() }
+        onChange(s.$spatialWidth) { [weak self] in self?.applySpatial() }
+        onChange(s.$spatialCrossfeed) { [weak self] in self?.applySpatial() }
+        onChange(s.$spatialDepth) { [weak self] in self?.applySpatial() }
+        onChange(s.$spatialElevation) { [weak self] in self?.applySpatial() }
+
         // Tempo / pitch
         onChange(s.$playbackRate) { [weak self] in self?.applyTempo() }
         onChange(s.$pitchCents) { [weak self] in self?.applyTempo() }
@@ -159,6 +186,7 @@ final class DSPChain {
         applyEQ()
         applyTone()
         applyReverb()
+        applySpatial()
         applyTempo()
         applyMasterDSP()
     }
@@ -257,6 +285,30 @@ final class DSPChain {
         set(.preDelayMS, Float(max(0, min(0.2, settings.reverbPreDelay)) * 1000))
     }
 
+    private func applySpatial() {
+        guard let spatial else { return }
+        let on = settings.spatialEnabled
+        spatial.bypass = !on
+
+        func set(_ addr: SpatialParam, _ value: Float) {
+            spatial.auAudioUnit.parameterTree?.parameter(withAddress: addr.rawValue)?.value = value
+        }
+
+        // Same reasoning as the EQ and the reverbs: driving the blend to fully
+        // dry means "off" is off whether or not `bypass` is honoured, and it
+        // flushes the reflections already sitting in the delay lines.
+        guard on else {
+            set(.amount, 0)
+            return
+        }
+
+        set(.amount, Float(max(0, min(100, settings.spatialAmount))))
+        set(.width, Float(max(0, min(2, settings.spatialWidth))))
+        set(.crossfeed, Float(max(0, min(100, settings.spatialCrossfeed))))
+        set(.depth, Float(max(0, min(100, settings.spatialDepth))))
+        set(.elevation, Float(max(0, min(100, settings.spatialElevation))))
+    }
+
     private func applyTempo() {
         let rate = Float(max(0.25, min(4.0, settings.playbackRate)))
         timePitch.rate = rate
@@ -288,6 +340,7 @@ final class DSPChain {
     /// True when any effect is doing something audible.
     var isActive: Bool {
         settings.eqEnabled || settings.toneEnabled || settings.reverbEnabled
+            || settings.spatialEnabled
             || abs(settings.playbackRate - 1) > 0.001
             || abs(settings.pitchCents) > 0.5
             || abs(settings.stereoWidth - 1) > 0.01
