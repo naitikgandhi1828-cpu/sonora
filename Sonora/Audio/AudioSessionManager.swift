@@ -18,6 +18,9 @@ final class AudioSessionManager: ObservableObject {
     @Published private(set) var isHeadphonesConnected: Bool = false
     @Published private(set) var hardwareSampleRate: Double = 48_000
     @Published private(set) var outputLatency: Double = 0
+    /// Native rate of the file currently loaded, for the Output screen. When
+    /// this and `hardwareSampleRate` disagree, Core Audio is resampling.
+    @Published private(set) var fileSampleRate: Double = 0
 
     /// Called when the system interrupts us (phone call, other app).
     var onInterruptionBegan: (() -> Void)?
@@ -54,9 +57,17 @@ final class AudioSessionManager: ObservableObject {
 
     /// Ask the hardware to run at the file's native rate so Core Audio does
     /// not have to resample. iOS may refuse; we simply take what we get.
+    ///
+    /// The returned value is the rate the session reports *right now*, which
+    /// is not necessarily the one that was asked for: `setPreferredSampleRate`
+    /// is a request, and the hardware changes over on its own schedule while
+    /// `sampleRate` keeps reporting the old value until it does. The caller
+    /// must not treat this as final - `AVAudioEngineConfigurationChange` is
+    /// what says the switch has actually happened.
     @discardableResult
     func preferSampleRate(_ rate: Double) -> Double {
         let session = AVAudioSession.sharedInstance()
+        fileSampleRate = rate
         guard rate > 0 else { return session.sampleRate }
         if abs(session.sampleRate - rate) < 1 { return session.sampleRate }
         do {

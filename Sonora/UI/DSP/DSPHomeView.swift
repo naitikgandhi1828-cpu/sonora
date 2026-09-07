@@ -277,14 +277,27 @@ struct OutputView: View {
         .background(themes.theme.background)
     }
 
+    /// True when the hardware and the file disagree, which is the one thing on
+    /// this screen that actually costs fidelity.
+    private var resampling: Bool {
+        session.fileSampleRate > 0
+            && abs(session.fileSampleRate - session.hardwareSampleRate) > 1
+    }
+
     private var routeCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             Label("Output", systemImage: session.routeSymbol)
                 .font(.system(size: 15, weight: .semibold))
             infoRow("Device", session.currentRouteName)
             infoRow("Hardware rate", "\(Int(session.hardwareSampleRate)) Hz")
+            if session.fileSampleRate > 0 {
+                infoRow("File rate", "\(Int(session.fileSampleRate)) Hz")
+                infoRow("Conversion", resampling ? "Resampling" : "None — direct")
+            }
             infoRow("Output latency", String(format: "%.1f ms", session.outputLatency * 1000))
-            Text("Sonora asks iOS to run the hardware at each file's native sample rate. iOS grants that where it can; Bluetooth routes usually stay fixed.")
+            Text(resampling
+                 ? "The hardware is not running at the file's rate, so Core Audio is converting. iOS will not always grant a rate change — Bluetooth routes in particular stay fixed at 48 kHz."
+                 : "Sonora asks iOS to run the hardware at each file's native sample rate, so nothing is being resampled on the way out.")
                 .font(.system(size: 11))
                 .foregroundStyle(themes.theme.textSecondary)
         }

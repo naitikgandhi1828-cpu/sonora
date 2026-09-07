@@ -51,13 +51,23 @@ struct NowPlayingView: View {
             // went grey on anything busy; the tint is what carries the album's
             // character down the whole screen.
             if settings.blurredArtBackground, let art = player.currentArtwork {
-                Image(uiImage: art)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .blur(radius: 80, opaque: true)
-                    .overlay(themes.theme.background.opacity(themes.theme.isDark ? 0.58 : 0.74))
-                    .ignoresSafeArea()
-                    .transition(.opacity)
+                // The GeometryReader is what keeps this honest. A `.fill` image
+                // with no frame reports whatever size the aspect ratio demands,
+                // and a wide cover therefore made this ZStack wider than the
+                // screen - which pushed the transport controls off the sides.
+                // Square art happened to look fine, which is why only *some*
+                // albums broke the layout.
+                GeometryReader { geo in
+                    Image(uiImage: art)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .blur(radius: 80, opaque: true)
+                        .overlay(themes.theme.background.opacity(themes.theme.isDark ? 0.58 : 0.74))
+                        .clipped()
+                }
+                .ignoresSafeArea()
+                .transition(.opacity)
             }
 
             LinearGradient(colors: [themes.accent.opacity(themes.theme.isDark ? 0.22 : 0.14),

@@ -80,6 +80,10 @@ final class PlaybackEngine {
     private var crossfadeRamp: (start: CFTimeInterval, duration: Double)?
 
     private var ticker: Timer?
+    private var configObserver: NSObjectProtocol?
+    /// Guards against a configuration-change notification arriving while we are
+    /// part-way through rebuilding the graph for the last one.
+    private var isRebuilding = false
 
     /// Set the moment a new schedule is installed, cleared once the node
     /// reports a sample time that actually falls inside it.
@@ -140,7 +144,29 @@ final class PlaybackEngine {
         attachNodes()
         buildGraph()
         hookSession()
+        hookEngineConfiguration()
         startTicker()
+    }
+
+    deinit {
+        if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
+        ticker?.invalidate()
+    }
+
+    /// AVAudioEngine tears its own connections down when the hardware format
+    /// changes underneath it - a new route, or the sample-rate switch we ask
+    /// for when a file with a different rate loads - and says so through this
+    /// notification. Nothing was listening, so after such a change the graph
+    /// was left connected at the old rate: every sample got resampled up to it
+    /// and then back down again on the way out, which is two conversions where
+    /// there should be none.
+    private func hookEngineConfiguration() {
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: .main) { [weak self] _ in
+                self?.rebuildForCurrentRoute(force: true)
+            }
     }
 
     private func attachNodes() {
@@ -205,15 +231,24 @@ final class PlaybackEngine {
 
     // MARK: - Graph rebuild
 
-    private func rebuildForCurrentRoute() {
+    private func rebuildForCurrentRoute(force: Bool = false) {
+        guard !isRebuilding else { return }
         let sr = AVAudioSession.sharedInstance().sampleRate
-        guard sr > 0, abs(sr - chainFormat.sampleRate) > 1 else { return }
+        guard sr > 0 else { return }
+        // A configuration change has already invalidated the connections, so
+        // the graph has to be rebuilt whether or not the rate moved.
+        guard force || abs(sr - chainFormat.sampleRate) > 1 else { return }
+        guard let rebuilt = AVAudioFormat(standardFormatWithSampleRate: sr, channels: 2) else { return }
+
+        isRebuilding = true
+        defer { isRebuilding = false }
+
         let resumePosition = currentTime
         let wasPlaying = isPlaying
         let item = currentItem
 
         stopEngineOnly()
-        chainFormat = AVAudioFormat(standardFormatWithSampleRate: sr, channels: 2)!
+        chainFormat = rebuilt
         for node in chain.orderedNodes { engine.disconnectNodeOutput(node) }
         engine.disconnectNodeOutput(sourceMixer)
         engine.disconnectNodeOutput(gainA)

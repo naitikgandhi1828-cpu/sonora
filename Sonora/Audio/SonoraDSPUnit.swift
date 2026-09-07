@@ -44,6 +44,18 @@ private struct DSPState {
     /// coefficient would use the *new* rate and reproduce the same stale
     /// number, so the raw setting has to be stored.
     var releaseMS: Float = 120
+    /// Lookahead delay line, one per channel, allocated once at init.
+    ///
+    /// The limiter used to compute its gain from the sample it was about to
+    /// output, so on a fast transient the gain had not come down yet and the
+    /// hard safety clamp below caught the overshoot instead - that is clipping,
+    /// not limiting, and it is audible as grit on every loud peak. Delaying the
+    /// audio by a millisecond and a half while the detector keeps reading
+    /// ahead gives the gain time to arrive before the peak does.
+    var lookL: UnsafeMutablePointer<Float>?
+    var lookR: UnsafeMutablePointer<Float>?
+    var lookSize: Int = 64
+    var lookIndex: Int = 0
     var ch0: UnsafeMutableRawPointer?
     var ch1: UnsafeMutableRawPointer?
 }
@@ -92,6 +104,9 @@ public final class SonoraDSPUnit: AUAudioUnit {
     private let state = UnsafeMutablePointer<DSPState>.allocate(capacity: 1)
     private let maxFrames = 4096
     private let maxChannels = 2
+    /// 1024 samples is a shade over 5 ms at 192 kHz, which is the most any
+    /// supported rate needs for the 1.5 ms window used below.
+    private let maxLookahead = 1024
     private var scratchABL: UnsafeMutableAudioBufferListPointer
     private var scratchMemory: [UnsafeMutableRawPointer] = []
 
@@ -132,6 +147,17 @@ public final class SonoraDSPUnit: AUAudioUnit {
         }
         state.pointee.ch0 = scratchMemory[0]
         state.pointee.ch1 = scratchMemory[1]
+
+        // Lookahead buffers. Allocated here, with the scratch memory, so the
+        // render block never has to.
+        let lookBytes = maxLookahead * MemoryLayout<Float>.size
+        for _ in 0..<2 {
+            let p = UnsafeMutableRawPointer.allocate(byteCount: lookBytes, alignment: 16)
+            memset(p, 0, lookBytes)
+            scratchMemory.append(p)
+        }
+        state.pointee.lookL = scratchMemory[2].assumingMemoryBound(to: Float.self)
+        state.pointee.lookR = scratchMemory[3].assumingMemoryBound(to: Float.self)
 
         maximumFramesToRender = AUAudioFrameCount(maxFrames)
         buildParameterTree()
@@ -223,6 +249,16 @@ public final class SonoraDSPUnit: AUAudioUnit {
         st.pointee.releaseCoef = expf(-1.0 / max(samples, 1))
     }
 
+    /// Attack is tied to the lookahead window: the gain has to be all the way
+    /// down by the time the peak that triggered it reaches the output, and
+    /// there is no reason for it to get there any faster than that. Reaching
+    /// the target over roughly 40% of the window leaves margin without making
+    /// the reduction abrupt enough to hear as a click.
+    private static func refreshAttackCoef(_ st: UnsafeMutablePointer<DSPState>) {
+        let window = Float(max(1, st.pointee.lookSize)) * 0.4
+        st.pointee.attackCoef = 1 - expf(-1.0 / max(window, 1))
+    }
+
     private static func read(_ addr: AUParameterAddress,
                              from st: UnsafeMutablePointer<DSPState>) -> AUValue {
         switch SonoraDSPParam(rawValue: addr) {
@@ -245,10 +281,26 @@ public final class SonoraDSPUnit: AUAudioUnit {
         state.pointee.sampleRate = rate > 0 ? rate : 48_000
         state.pointee.envelope = 0
         state.pointee.gain = 1
-        // The coefficient was built at init against the 48 kHz placeholder.
+
+        // 1.5 ms of lookahead, in samples at whatever rate we ended up running.
+        let window = Int(0.0015 * Double(state.pointee.sampleRate))
+        state.pointee.lookSize = max(16, min(maxLookahead, window))
+        state.pointee.lookIndex = 0
+        state.pointee.lookL?.update(repeating: 0, count: maxLookahead)
+        state.pointee.lookR?.update(repeating: 0, count: maxLookahead)
+
+        // The coefficients were built at init against the 48 kHz placeholder.
         // Without this, the limiter releases ~9% off on 44.1 kHz material and
         // is badly wrong at 96 kHz.
         SonoraDSPUnit.refreshReleaseCoef(state)
+        SonoraDSPUnit.refreshAttackCoef(state)
+    }
+
+    /// The lookahead delay is real latency and the host is entitled to know
+    /// about it, so it can keep this unit aligned with anything running beside
+    /// it.
+    public override var latency: TimeInterval {
+        Double(state.pointee.lookSize) / Double(max(1, state.pointee.sampleRate))
     }
 
     public override func deallocateRenderResources() {
@@ -316,6 +368,18 @@ public final class SonoraDSPUnit: AUAudioUnit {
             let ceiling = s.ceiling
             let relCoef = s.releaseCoef
             let atkCoef = s.attackCoef
+            // Per-sample step of a one-pole with time constant `releaseMS`.
+            // This used to be multiplied by eight, which recovered a 120 ms
+            // release in about 15 ms - faster than one cycle of a low bass
+            // note, so the gain rode the waveform itself and turned sustained
+            // bass into intermodulation distortion.
+            let relStep = 1 - relCoef
+
+            guard let lookL = s.lookL, let lookR = s.lookR else {
+                return kAudioUnitErr_Uninitialized
+            }
+            let lookSize = max(1, min(s.lookSize, 1024))
+            var lookIndex = s.lookIndex >= lookSize ? 0 : s.lookIndex
 
             var env = s.envelope
             var gain = s.gain
@@ -339,29 +403,46 @@ public final class SonoraDSPUnit: AUAudioUnit {
                 l *= gainL
                 r *= gainR
 
+                // Push this sample into the delay line and take out the one
+                // that went in `lookSize` samples ago. The detector below still
+                // reads `l`/`r`, so it is looking that far into the future of
+                // whatever is being written to the output.
+                let idx = lookIndex
+                let delayedL = lookL[idx]
+                let delayedR = lookR[idx]
+                lookL[idx] = l
+                lookR[idx] = r
+                lookIndex = idx + 1 >= lookSize ? 0 : idx + 1
+
+                var outSampleL = delayedL
+                var outSampleR = delayedR
+
                 if limiting {
                     let peak = max(abs(l), abs(r))
-                    // Instant attack, exponential release on the envelope.
                     env = peak > env ? peak : env * relCoef
                     let target: Float = env > ceiling ? ceiling / env : 1
-                    // One-pole smoothing so gain changes never click.
-                    gain += (target - gain) * (target < gain ? atkCoef : (1 - relCoef) * 8)
+                    gain += (target - gain) * (target < gain ? atkCoef : relStep)
                     if gain > 1 { gain = 1 }
                     if gain < 0.0001 { gain = 0.0001 }
-                    l *= gain
-                    r *= gain
-                    // Hard safety clamp.
-                    if l > ceiling { l = ceiling } else if l < -ceiling { l = -ceiling }
-                    if r > ceiling { r = ceiling } else if r < -ceiling { r = -ceiling }
+                    outSampleL *= gain
+                    outSampleR *= gain
+                    // Last line of defence. With the lookahead in place this
+                    // should never fire; if it ever does, something upstream
+                    // has gone wrong and a clamp beats a blown speaker.
+                    if outSampleL > ceiling { outSampleL = ceiling }
+                    else if outSampleL < -ceiling { outSampleL = -ceiling }
+                    if outSampleR > ceiling { outSampleR = ceiling }
+                    else if outSampleR < -ceiling { outSampleR = -ceiling }
                 }
 
-                outL[i] = l
-                if outR != outL { outR[i] = r }
+                outL[i] = outSampleL
+                if outR != outL { outR[i] = outSampleR }
                 i += 1
             }
 
             st.pointee.envelope = env
             st.pointee.gain = gain
+            st.pointee.lookIndex = lookIndex
             return noErr
         }
     }

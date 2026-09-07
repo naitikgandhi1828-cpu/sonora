@@ -7,6 +7,7 @@
 
 import Foundation
 import UIKit
+import ImageIO
 import CryptoKit
 
 final class ArtworkStore {
@@ -25,8 +26,41 @@ final class ArtworkStore {
     }
 
     private init() {
-        memory.countLimit = 60
-        thumbMemory.countLimit = 500
+        // Counting objects is the wrong unit for images: 500 thumbnails sounds
+        // modest until each one is a few hundred kilobytes of decoded bitmap.
+        // Both caches are bounded by bytes as well, and every insert declares
+        // its real cost, so memory pressure evicts something sensible instead
+        // of the app being killed.
+        memory.countLimit = 24
+        memory.totalCostLimit = 48 * 1024 * 1024
+        thumbMemory.countLimit = 300
+        thumbMemory.totalCostLimit = 16 * 1024 * 1024
+    }
+
+    /// Decodes an image file straight to the size we intend to use.
+    ///
+    /// `UIImage(contentsOfFile:)` decodes at full resolution, so a 3000px cover
+    /// costs 36 MB of bitmap however small it is drawn. ImageIO can decode
+    /// directly to a bounded size, which caps what any one cover can cost no
+    /// matter what is already sitting in the cache directory.
+    private static func decode(_ url: URL, maxPixel: CGFloat) -> UIImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return UIImage(cgImage: cg)
+    }
+
+    /// Decoded size in bytes, for the cache's cost accounting.
+    private static func cost(_ image: UIImage) -> Int {
+        guard let cg = image.cgImage else { return 1 }
+        return cg.bytesPerRow * cg.height
     }
 
     /// Stores artwork bytes under a key derived from the album, so every
@@ -51,8 +85,8 @@ final class ArtworkStore {
         guard let key else { return nil }
         if let cached = memory.object(forKey: key as NSString) { return cached }
         let url = directory.appendingPathComponent("\(key).jpg")
-        guard let image = UIImage(contentsOfFile: url.path) else { return nil }
-        memory.setObject(image, forKey: key as NSString)
+        guard let image = Self.decode(url, maxPixel: 1000) else { return nil }
+        memory.setObject(image, forKey: key as NSString, cost: Self.cost(image))
         return image
     }
 
@@ -60,11 +94,11 @@ final class ArtworkStore {
         guard let key else { return nil }
         if let cached = thumbMemory.object(forKey: key as NSString) { return cached }
         let url = directory.appendingPathComponent("\(key)_t.jpg")
-        guard let thumb = UIImage(contentsOfFile: url.path) else {
+        guard let thumb = Self.decode(url, maxPixel: 200) else {
             // No thumbnail on disk yet — fall back to the full-size image.
             return self.image(forKey: key)
         }
-        thumbMemory.setObject(thumb, forKey: key as NSString)
+        thumbMemory.setObject(thumb, forKey: key as NSString, cost: Self.cost(thumb))
         return thumb
     }
 
@@ -121,7 +155,17 @@ extension UIImage {
         let scale = maxDimension / longest
         let newSize = CGSize(width: (size.width * scale).rounded(),
                              height: (size.height * scale).rounded())
-        let renderer = UIGraphicsImageRenderer(size: newSize)
+
+        // `UIGraphicsImageRendererFormat.default()` inherits the screen scale,
+        // which on this phone is 3. Every "1000 point" cover was therefore
+        // written out at 3000 pixels and every "200 point" thumbnail at 600 -
+        // nine times the pixels, nine times the decode cost and nine times the
+        // memory. Pinning the scale to 1 makes the number mean pixels.
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        format.opaque = true
+
+        let renderer = UIGraphicsImageRenderer(size: newSize, format: format)
         return renderer.image { _ in
             self.draw(in: CGRect(origin: .zero, size: newSize))
         }
