@@ -152,11 +152,13 @@ final class DSPChain {
 
         // Reverb
         onChange(s.$reverbEnabled) { [weak self] in self?.applyReverb() }
-        onChange(s.$reverbRoom) { [weak self] in self?.applyReverb() }
         onChange(s.$reverbMix) { [weak self] in self?.applyReverb() }
-        onChange(s.$reverbDecay) { [weak self] in self?.applyReverb() }
-        onChange(s.$reverbDamping) { [weak self] in self?.applyReverb() }
+        onChange(s.$reverbDamp) { [weak self] in self?.applyReverb() }
+        onChange(s.$reverbFilter) { [weak self] in self?.applyReverb() }
+        onChange(s.$reverbFade) { [weak self] in self?.applyReverb() }
         onChange(s.$reverbPreDelay) { [weak self] in self?.applyReverb() }
+        onChange(s.$reverbPreDelayMix) { [weak self] in self?.applyReverb() }
+        onChange(s.$reverbSize) { [weak self] in self?.applyReverb() }
         onChange(s.$reverbUseFreeverb) { [weak self] in self?.applyReverb() }
 
         // Spatial
@@ -252,11 +254,15 @@ final class DSPChain {
         if useFreeverb {
             applyFreeverb()
         } else {
-            reverb.apply(room: settings.reverbRoom,
-                         decaySeconds: settings.reverbDecay,
-                         damping: settings.reverbDamping,
-                         preDelay: settings.reverbPreDelay)
-            reverb.setMix(settings.reverbMix)
+            // AUReverb2 has no equivalent of Filter or Pre-Delay Mix, and its
+            // dimensions only come from its own preset list, so Size is
+            // quantised onto the nearest room. Those two controls simply do
+            // nothing on this engine, which the UI says out loud.
+            reverb.apply(room: ReverbRoom.forSize(settings.reverbSize),
+                         decaySeconds: 0.4 + settings.reverbFade * 7.5,
+                         damping: settings.reverbDamp,
+                         preDelay: settings.reverbPreDelay * 0.2)
+            reverb.setMix(settings.reverbMix * 100)
         }
     }
 
@@ -267,22 +273,16 @@ final class DSPChain {
     private func applyFreeverb() {
         guard freeverb != nil else { return }
         let set = setFreeverb
+        func unit(_ v: Double) -> Float { Float(max(0, min(1, v))) }
 
-        // The room preset supplies a nominal decay and the slider scales it,
-        // exactly as on the AUReverb2 path, so switching engines keeps the
-        // same sense of space instead of jumping to a different room.
-        let shape = settings.reverbRoom.reverb2Shape
-        let scale = Float(max(0.1, settings.reverbDecay)) / 2.4
-        let effectiveDecay = shape.2 * scale
-        // Comb feedback saturates as it approaches 1, so the useful decay
-        // range maps onto roughly the first nine seconds.
-        let room = max(0.05, min(1, effectiveDecay / 9.0))
-
-        set(.mix, Float(max(0, min(100, settings.reverbMix))))
-        set(.roomSize, room)
-        set(.damping, Float(max(0, min(1, settings.reverbDamping))))
+        set(.mix, unit(settings.reverbMix))
+        set(.size, unit(settings.reverbSize))
+        set(.fade, unit(settings.reverbFade))
+        set(.damp, unit(settings.reverbDamp))
+        set(.filter, unit(settings.reverbFilter))
+        set(.preDelay, unit(settings.reverbPreDelay))
+        set(.preDelayMix, unit(settings.reverbPreDelayMix))
         set(.width, 1)
-        set(.preDelayMS, Float(max(0, min(0.2, settings.reverbPreDelay)) * 1000))
     }
 
     private func applySpatial() {

@@ -94,26 +94,44 @@ struct EffectsRackView: View {
 
     // MARK: Reverb
 
+    /// Moving any control by hand takes the preset name off the readout — the
+    /// values are no longer that preset once one of them has been changed.
+    private func reverbBinding(_ keyPath: ReferenceWritableKeyPath<AppSettings, Double>) -> Binding<Double> {
+        Binding(get: { settings[keyPath: keyPath] },
+                set: {
+                    settings[keyPath: keyPath] = $0
+                    if settings.reverbPresetName != "Custom" { settings.reverbPresetName = "Custom" }
+                })
+    }
+
     private var reverbCard: some View {
         card(title: "Reverb", symbol: "square.stack.3d.down.right", isOn: $settings.reverbEnabled) {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Room")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(themes.theme.textPrimary)
+                HStack {
+                    Text("Room")
+                        .font(.system(size: 13, weight: .medium))
+                    Spacer()
+                    Text(settings.reverbPresetName)
+                        .font(.system(size: 12))
+                        .foregroundStyle(themes.theme.textSecondary)
+                }
+                .foregroundStyle(themes.theme.textPrimary)
+
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 8)], spacing: 8) {
-                    ForEach(ReverbRoom.allCases) { room in
+                    ForEach(AppSettings.ReverbPreset.all) { preset in
+                        let selected = settings.reverbPresetName == preset.name
                         Button {
-                            settings.reverbRoom = room
+                            settings.apply(reverbPreset: preset)
                             settings.reverbEnabled = true
                             Haptics.select()
                         } label: {
-                            Text(room.label)
-                                .font(.system(size: 12, weight: settings.reverbRoom == room ? .semibold : .regular))
+                            Text(preset.name)
+                                .font(.system(size: 12, weight: selected ? .semibold : .regular))
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 8)
-                                .background(settings.reverbRoom == room ? themes.accent : themes.theme.surfaceElevated,
+                                .background(selected ? themes.accent : themes.theme.surfaceElevated,
                                             in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                                .foregroundStyle(settings.reverbRoom == room ? .white : themes.theme.textPrimary)
+                                .foregroundStyle(selected ? .white : themes.theme.textPrimary)
                         }
                         .buttonStyle(.plain)
                     }
@@ -131,32 +149,42 @@ struct EffectsRackView: View {
                     }
                     .pickerStyle(.segmented)
                     Text(settings.reverbUseFreeverb
-                         ? "Eight comb filters into four allpass diffusers. Denser and warmer."
-                         : "Apple's AUReverb2. Cleaner, less coloured.")
+                         ? "Eight comb filters into four allpass diffusers. Denser and warmer, and the only engine that responds to every control below."
+                         : "Apple's AUReverb2. Cleaner and less coloured, but it takes its dimensions from a fixed preset list — Filter and Pre-Delay Mix do nothing here, and Size snaps to the nearest room it has.")
                         .font(.system(size: 11))
                         .foregroundStyle(themes.theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
-            LabeledSlider(title: "Wet Mix", value: $settings.reverbMix, range: 0...100,
-                          format: { String(format: "%.0f%%", $0) },
-                          onReset: { settings.reverbMix = 35 })
-
-            if player.dsp.reverb.isAdvanced || settings.reverbUseFreeverb {
-                LabeledSlider(title: "Decay", value: $settings.reverbDecay, range: 0.2...12,
-                              format: { String(format: "%.1f s", $0) },
-                              onReset: { settings.reverbDecay = 2.4 })
-                LabeledSlider(title: "High-Frequency Damping", value: $settings.reverbDamping, range: 0...1,
-                              format: { String(format: "%.0f%%", $0 * 100) },
-                              onReset: { settings.reverbDamping = 0.5 })
-                LabeledSlider(title: "Pre-Delay", value: $settings.reverbPreDelay, range: 0...0.2,
-                              format: { String(format: "%.0f ms", $0 * 1000) },
-                              onReset: { settings.reverbPreDelay = 0.02 })
-            } else {
-                Text("This device only exposes preset reverb, so decay and damping are fixed by the room choice.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(themes.theme.textSecondary)
+            Group {
+                LabeledSlider(title: "Damp", value: reverbBinding(\.reverbDamp), range: 0...1,
+                              format: { String(format: "%.2f", $0) },
+                              onReset: { settings.reverbDamp = 0.5 })
+                LabeledSlider(title: "Filter", value: reverbBinding(\.reverbFilter), range: 0...1,
+                              format: { String(format: "%.2f", $0) },
+                              onReset: { settings.reverbFilter = 0.8 })
+                LabeledSlider(title: "Fade", value: reverbBinding(\.reverbFade), range: 0...1,
+                              format: { String(format: "%.2f", $0) },
+                              onReset: { settings.reverbFade = 0.5 })
+                LabeledSlider(title: "Pre-Delay", value: reverbBinding(\.reverbPreDelay), range: 0...1,
+                              format: { String(format: "%.2f", $0) },
+                              onReset: { settings.reverbPreDelay = 0.1 })
+                LabeledSlider(title: "Pre-Delay Mix", value: reverbBinding(\.reverbPreDelayMix), range: 0...1,
+                              format: { String(format: "%.2f", $0) },
+                              onReset: { settings.reverbPreDelayMix = 0.5 })
+                LabeledSlider(title: "Size", value: reverbBinding(\.reverbSize), range: 0...1,
+                              format: { String(format: "%.2f", $0) },
+                              onReset: { settings.reverbSize = 0.5 })
+                LabeledSlider(title: "Mix", value: reverbBinding(\.reverbMix), range: 0...1,
+                              format: { String(format: "%.2f", $0) },
+                              onReset: { settings.reverbMix = 0.35 })
             }
+
+            Text("Size is the room's dimensions; Fade is how long the tail takes to die away. They are separate, which is why a small room can still ring and a large one can be short.")
+                .font(.system(size: 11))
+                .foregroundStyle(themes.theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

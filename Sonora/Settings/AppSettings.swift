@@ -131,12 +131,19 @@ final class AppSettings: ObservableObject {
 
     // MARK: Reverb
 
+    // The control set matches Poweramp's, because that is the reverb being
+    // compared against and its knobs separate things the old set conflated:
+    // Size is the room's dimensions, Fade is how long the tail takes to die.
+    // Every value is normalised 0...1 so the UI shows the same numbers.
     @Published var reverbEnabled: Bool { didSet { save(reverbEnabled, "revOn") } }
-    @Published var reverbRoom: ReverbRoom { didSet { save(reverbRoom.rawValue, "revRoom") } }
-    @Published var reverbMix: Double { didSet { save(reverbMix, "revMix") } }          // 0...100 %
-    @Published var reverbDecay: Double { didSet { save(reverbDecay, "revDecay") } }     // seconds, advanced engine
-    @Published var reverbDamping: Double { didSet { save(reverbDamping, "revDamp") } }  // 0...1, advanced engine
-    @Published var reverbPreDelay: Double { didSet { save(reverbPreDelay, "revPre") } } // seconds
+    @Published var reverbPresetName: String { didSet { save(reverbPresetName, "revPreset") } }
+    @Published var reverbDamp: Double { didSet { save(reverbDamp, "revDamp2") } }
+    @Published var reverbFilter: Double { didSet { save(reverbFilter, "revFilter") } }
+    @Published var reverbFade: Double { didSet { save(reverbFade, "revFade") } }
+    @Published var reverbPreDelay: Double { didSet { save(reverbPreDelay, "revPre2") } }
+    @Published var reverbPreDelayMix: Double { didSet { save(reverbPreDelayMix, "revPreMix") } }
+    @Published var reverbSize: Double { didSet { save(reverbSize, "revSize") } }
+    @Published var reverbMix: Double { didSet { save(reverbMix, "revMix2") } }
     @Published var reverbUseAdvanced: Bool { didSet { save(reverbUseAdvanced, "revAdv") } }
     /// true = Freeverb (Schroeder-Moorer), false = Apple AUReverb2.
     @Published var reverbUseFreeverb: Bool { didSet { save(reverbUseFreeverb, "revFv") } }
@@ -247,11 +254,15 @@ final class AppSettings: ObservableObject {
         trebleFrequency = n("trebleFreq", 6000)
 
         reverbEnabled = b("revOn", false)
-        reverbRoom = ReverbRoom(rawValue: i("revRoom", 3)) ?? .mediumHall
-        reverbMix = n("revMix", 35)
-        reverbDecay = n("revDecay", 2.4)
-        reverbDamping = n("revDamp", 0.5)
-        reverbPreDelay = n("revPre", 0.02)
+        let defaultReverb = AppSettings.ReverbPreset.scene
+        reverbPresetName = s("revPreset", defaultReverb.name)
+        reverbDamp = n("revDamp2", defaultReverb.damp)
+        reverbFilter = n("revFilter", defaultReverb.filter)
+        reverbFade = n("revFade", defaultReverb.fade)
+        reverbPreDelay = n("revPre2", defaultReverb.preDelay)
+        reverbPreDelayMix = n("revPreMix", defaultReverb.preDelayMix)
+        reverbSize = n("revSize", defaultReverb.size)
+        reverbMix = n("revMix2", defaultReverb.mix)
         reverbUseAdvanced = b("revAdv", true)
         reverbUseFreeverb = b("revFv", true)
 
@@ -339,11 +350,76 @@ final class AppSettings: ObservableObject {
     func resetDSP() {
         bassDB = 0; trebleDB = 0; toneEnabled = false
         stereoWidth = 1; balance = 0; monoDownmix = false
-        reverbEnabled = false; reverbMix = 35
+        reverbEnabled = false
+        apply(reverbPreset: .scene)
         spatialEnabled = false
         applySpatialPreset(.headphones)
         playbackRate = 1; pitchCents = 0
         masterPreampDB = 0
+    }
+
+    // MARK: - Reverb presets
+
+    /// The eight rooms Poweramp ships, with its own values.
+    struct ReverbPreset: Identifiable, Hashable {
+        let name: String
+        let damp: Double
+        let filter: Double
+        let fade: Double
+        let preDelay: Double
+        let preDelayMix: Double
+        let size: Double
+        let mix: Double
+
+        var id: String { name }
+
+        //                                        damp  filt  fade  pre  preMix size  mix
+        static let studio       = ReverbPreset(name: "Studio",
+                                               damp: 0.99, filter: 0.11, fade: 1.00,
+                                               preDelay: 0.04, preDelayMix: 0.44,
+                                               size: 0.03, mix: 0.47)
+        static let smallRoom    = ReverbPreset(name: "Small Room",
+                                               damp: 0.53, filter: 1.00, fade: 1.00,
+                                               preDelay: 0.00, preDelayMix: 0.62,
+                                               size: 0.00, mix: 0.32)
+        static let lightReverb  = ReverbPreset(name: "Light Reverb",
+                                               damp: 0.44, filter: 0.80, fade: 0.32,
+                                               preDelay: 0.25, preDelayMix: 0.35,
+                                               size: 0.60, mix: 0.38)
+        static let scene        = ReverbPreset(name: "Scene",
+                                               damp: 0.41, filter: 0.70, fade: 0.50,
+                                               preDelay: 0.12, preDelayMix: 0.43,
+                                               size: 0.24, mix: 0.45)
+        static let echo         = ReverbPreset(name: "Echo",
+                                               damp: 0.36, filter: 0.91, fade: 0.27,
+                                               preDelay: 0.54, preDelayMix: 0.58,
+                                               size: 0.73, mix: 0.37)
+        static let auditorium   = ReverbPreset(name: "Auditorium",
+                                               damp: 0.90, filter: 0.70, fade: 0.81,
+                                               preDelay: 0.00, preDelayMix: 0.00,
+                                               size: 0.00, mix: 0.50)
+        static let greatHall    = ReverbPreset(name: "Great Hall",
+                                               damp: 0.26, filter: 0.71, fade: 0.00,
+                                               preDelay: 0.95, preDelayMix: 0.53,
+                                               size: 0.52, mix: 0.44)
+        static let stadium      = ReverbPreset(name: "Stadium",
+                                               damp: 0.84, filter: 0.62, fade: 0.83,
+                                               preDelay: 0.45, preDelayMix: 0.74,
+                                               size: 0.99, mix: 0.38)
+
+        static let all: [ReverbPreset] = [studio, smallRoom, lightReverb, scene,
+                                          echo, auditorium, greatHall, stadium]
+    }
+
+    func apply(reverbPreset preset: ReverbPreset) {
+        reverbDamp = preset.damp
+        reverbFilter = preset.filter
+        reverbFade = preset.fade
+        reverbPreDelay = preset.preDelay
+        reverbPreDelayMix = preset.preDelayMix
+        reverbSize = preset.size
+        reverbMix = preset.mix
+        reverbPresetName = preset.name
     }
 
     // MARK: - Spatial presets

@@ -23,12 +23,24 @@ import AudioToolbox
 
 // MARK: - Parameter addresses
 
+/// The control set is deliberately the one Poweramp exposes, because that is
+/// the reverb the user is comparing against and its knobs separate things
+/// Freeverb's original two did not: `size` scales the delay lines (the physical
+/// dimensions of the room) while `fade` sets the comb feedback (how long it
+/// takes to die away). Freeverb called the second one "room size", which is why
+/// changing it never actually changed the room.
+///
+/// Every value is normalised 0...1 so the UI can show the same numbers the
+/// screenshots do.
 enum FreeverbParam: AUParameterAddress {
-    case mix        = 0     // 0...100 %
-    case roomSize   = 1     // 0...1
-    case damping    = 2     // 0...1
-    case width      = 3     // 0...1
-    case preDelayMS = 4     // 0...200 ms
+    case mix         = 0    // 0...1, wet/dry
+    case size        = 1    // 0...1, delay-line scale
+    case fade        = 2    // 0...1, comb feedback -> decay length
+    case damp        = 3    // 0...1, HF damping inside the feedback loop
+    case filter      = 4    // 0...1, low-pass on the wet path (1 = wide open)
+    case preDelay    = 5    // 0...1 -> 0...200 ms
+    case preDelayMix = 6    // 0...1, how much of the reverb input is delayed
+    case width       = 7    // 0...1, stereo spread
 }
 
 /// One damped comb filter. Plain-old-data so it can live in malloc'd memory.
@@ -60,12 +72,24 @@ private struct FVState {
     var wet2: Float = 0
     var dry: Float = 1
 
+    /// One-pole low-pass state for the `filter` control, per channel.
+    var filtL: Float = 0
+    var filtR: Float = 0
+    var filterCoef: Float = 1
+
+    /// How the pre-delayed and immediate copies are blended into the tank.
+    var preWet: Float = 1
+    var preDry: Float = 0
+
     // Raw settings, kept so derived values can be rebuilt after a rate change.
-    var mix: Float = 35
-    var roomSize: Float = 0.5
-    var damping: Float = 0.5
+    var mix: Float = 0.35
+    var size: Float = 0.5
+    var fade: Float = 0.5
+    var damp: Float = 0.5
+    var filter: Float = 0.8
+    var preDelay: Float = 0.1
+    var preDelayMix: Float = 0.5
     var width: Float = 1
-    var preDelayMS: Float = 20
 
     var sampleRate: Float = 48_000
 
@@ -122,8 +146,19 @@ public final class FreeverbUnit: AUAudioUnit {
     private static let offsetRoom: Float = 0.7
 
     /// Delay lines are sized for the highest rate we will ever run at, so a
-    /// route change to 96 kHz never needs to allocate.
-    private static let maxRateFactor: Float = 192_000.0 / 44_100.0
+    /// route change to 96 kHz never needs to allocate. The extra 1.6 is
+    /// headroom for the `size` control, which stretches the lines beyond their
+    /// published tuning at the top of its travel.
+    private static let maxSizeFactor: Float = 1.6
+    private static let maxRateFactor: Float = 192_000.0 / 44_100.0 * 1.6
+
+    /// `size` 0...1 maps onto this multiple of the published tunings. Below 1
+    /// the room is tighter and more metallic, above it more cavernous.
+    private static let minSizeFactor: Float = 0.35
+
+    /// The `filter` control sweeps a one-pole low-pass across the wet path.
+    private static let filterMinHz: Float = 800
+    private static let filterMaxHz: Float = 20_000
 
     private static let combCount = 8
     private static let allpassCount = 4
@@ -260,11 +295,14 @@ public final class FreeverbUnit: AUAudioUnit {
         }
 
         let params = [
-            p(.mix,        "mix",      "Mix",        0, 100, 35, .percent),
-            p(.roomSize,   "room",     "Room Size",  0,   1, 0.5, .generic),
-            p(.damping,    "damping",  "Damping",    0,   1, 0.5, .generic),
-            p(.width,      "width",    "Width",      0,   1, 1,   .generic),
-            p(.preDelayMS, "predelay", "Pre-delay",  0, 200, 20,  .milliseconds)
+            p(.mix,         "mix",         "Mix",           0, 1, 0.35, .generic),
+            p(.size,        "size",        "Size",          0, 1, 0.5,  .generic),
+            p(.fade,        "fade",        "Fade",          0, 1, 0.5,  .generic),
+            p(.damp,        "damp",        "Damp",          0, 1, 0.5,  .generic),
+            p(.filter,      "filter",      "Filter",        0, 1, 0.8,  .generic),
+            p(.preDelay,    "predelay",    "Pre-Delay",     0, 1, 0.1,  .generic),
+            p(.preDelayMix, "predelaymix", "Pre-Delay Mix", 0, 1, 0.5,  .generic),
+            p(.width,       "width",       "Width",         0, 1, 1,    .generic)
         ]
 
         let tree = AUParameterTree.createTree(withChildren: params)
@@ -277,13 +315,8 @@ public final class FreeverbUnit: AUAudioUnit {
         tree.implementorValueProvider = { param in
             FreeverbUnit.read(param.address, from: st)
         }
-        tree.implementorStringFromValueCallback = { param, valuePtr in
-            let v = valuePtr?.pointee ?? param.value
-            switch FreeverbParam(rawValue: param.address) {
-            case .mix:        return String(format: "%.0f%%", v)
-            case .preDelayMS: return String(format: "%.0f ms", v)
-            default:          return String(format: "%.0f%%", v * 100)
-            }
+        tree.implementorStringFromValueCallback = { _, valuePtr in
+            String(format: "%.2f", valuePtr?.pointee ?? 0)
         }
 
         for param in params { FreeverbUnit.apply(param.address, param.value, to: st) }
@@ -292,13 +325,17 @@ public final class FreeverbUnit: AUAudioUnit {
     private static func apply(_ addr: AUParameterAddress,
                               _ value: AUValue,
                               to st: UnsafeMutablePointer<FVState>) {
+        let v = max(0, min(1, value))
         switch FreeverbParam(rawValue: addr) {
-        case .mix:        st.pointee.mix = max(0, min(100, value))
-        case .roomSize:   st.pointee.roomSize = max(0, min(1, value))
-        case .damping:    st.pointee.damping = max(0, min(1, value))
-        case .width:      st.pointee.width = max(0, min(1, value))
-        case .preDelayMS: st.pointee.preDelayMS = max(0, min(200, value))
-        case .none:       return
+        case .mix:         st.pointee.mix = v
+        case .size:        st.pointee.size = v
+        case .fade:        st.pointee.fade = v
+        case .damp:        st.pointee.damp = v
+        case .filter:      st.pointee.filter = v
+        case .preDelay:    st.pointee.preDelay = v
+        case .preDelayMix: st.pointee.preDelayMix = v
+        case .width:       st.pointee.width = v
+        case .none:        return
         }
         recompute(st)
     }
@@ -306,12 +343,15 @@ public final class FreeverbUnit: AUAudioUnit {
     private static func read(_ addr: AUParameterAddress,
                              from st: UnsafeMutablePointer<FVState>) -> AUValue {
         switch FreeverbParam(rawValue: addr) {
-        case .mix:        return st.pointee.mix
-        case .roomSize:   return st.pointee.roomSize
-        case .damping:    return st.pointee.damping
-        case .width:      return st.pointee.width
-        case .preDelayMS: return st.pointee.preDelayMS
-        case .none:       return 0
+        case .mix:         return st.pointee.mix
+        case .size:        return st.pointee.size
+        case .fade:        return st.pointee.fade
+        case .damp:        return st.pointee.damp
+        case .filter:      return st.pointee.filter
+        case .preDelay:    return st.pointee.preDelay
+        case .preDelayMix: return st.pointee.preDelayMix
+        case .width:       return st.pointee.width
+        case .none:        return 0
         }
     }
 
@@ -319,23 +359,61 @@ public final class FreeverbUnit: AUAudioUnit {
     /// the audio thread only.
     private static func recompute(_ st: UnsafeMutablePointer<FVState>) {
         let s = st.pointee
+        let sr = max(s.sampleRate, 8_000)
 
-        st.pointee.feedback = s.roomSize * scaleRoom + offsetRoom
-        st.pointee.damp1 = s.damping * scaleDamp
-        st.pointee.damp2 = 1 - s.damping * scaleDamp
+        // Fade is the comb feedback, which is what actually sets decay length.
+        st.pointee.feedback = s.fade * scaleRoom + offsetRoom
+        st.pointee.damp1 = s.damp * scaleDamp
+        st.pointee.damp2 = 1 - s.damp * scaleDamp
 
-        // Equal-power blend so the lower half of the mix slider is audible.
-        let m = s.mix / 100
-        let wetG = sqrt(m) * scaleWet
-        let dryG = sqrt(1 - m)
+        // Filter sweeps exponentially, because pitch is exponential and a
+        // linear sweep would spend most of its travel above the range where
+        // the ear notices a reverb getting darker.
+        let hz = filterMinHz * powf(filterMaxHz / filterMinHz, s.filter)
+        let coef = 1 - expf(-2 * .pi * min(hz, sr * 0.45) / sr)
+        st.pointee.filterCoef = min(1, max(0.0005, coef))
+
+        // Equal-power blend so the lower half of the mix control is audible.
+        let wetG = sqrt(s.mix) * scaleWet
+        let dryG = sqrt(1 - s.mix)
         let w = s.width
         st.pointee.wet1 = wetG * (w / 2 + 0.5)
         st.pointee.wet2 = wetG * ((1 - w) / 2)
         st.pointee.dry = dryG
 
-        let sr = max(s.sampleRate, 8_000)
-        let preSamples = Int(s.preDelayMS * 0.001 * sr)
+        let preSamples = Int(s.preDelay * 0.2 * sr)
         st.pointee.preSize = max(1, min(s.preCapacity - 1, preSamples))
+        st.pointee.preWet = s.preDelayMix
+        st.pointee.preDry = 1 - s.preDelayMix
+
+        resizeDelayLines(st)
+    }
+
+    /// Sets every comb and allpass length for the current rate and `size`.
+    ///
+    /// Called off the audio thread, but the render block may be part-way
+    /// through a buffer when it lands, so it never touches the read indices —
+    /// the render block clamps those against the current size instead.
+    private static func resizeDelayLines(_ st: UnsafeMutablePointer<FVState>) {
+        let sr = max(st.pointee.sampleRate, 8_000)
+        let sizeFactor = minSizeFactor + st.pointee.size * (maxSizeFactor - minSizeFactor)
+        let factor = (sr / 44_100) * sizeFactor
+        let combs = st.pointee.combs
+        let allpasses = st.pointee.allpasses
+
+        for side in 0..<2 {
+            let spread = side == 0 ? 0 : stereoSpread
+            for k in 0..<combCount {
+                let idx = side * combCount + k
+                let base = Float(combTuning[k] + spread)
+                combs[idx].size = max(1, min(combs[idx].capacity - 1, Int(base * factor)))
+            }
+            for k in 0..<allpassCount {
+                let idx = side * allpassCount + k
+                let base = Float(allpassTuning[k] + spread)
+                allpasses[idx].size = max(1, min(allpasses[idx].capacity - 1, Int(base * factor)))
+            }
+        }
     }
 
     // MARK: Resources
@@ -350,33 +428,29 @@ public final class FreeverbUnit: AUAudioUnit {
         // Freeverb's tunings are prime-ish lengths chosen at 44.1 kHz. Scaling
         // them keeps the modal density of the room constant across rates
         // rather than letting the reverb change character with the hardware.
-        let factor = sr / 44_100
+        // `resizeDelayLines` below applies both that and the size control;
+        // here we only have to clear what is in them.
         let combCount = FreeverbUnit.combCount
         let allpassCount = FreeverbUnit.allpassCount
         let combs = state.pointee.combs
         let allpasses = state.pointee.allpasses
 
         for side in 0..<2 {
-            let spread = side == 0 ? 0 : FreeverbUnit.stereoSpread
             for k in 0..<combCount {
                 let idx = side * combCount + k
-                let base = Float(FreeverbUnit.combTuning[k] + spread)
-                let size = max(1, min(combs[idx].capacity - 1, Int(base * factor)))
-                combs[idx].size = size
                 combs[idx].index = 0
                 combs[idx].store = 0
                 combs[idx].buffer.update(repeating: 0, count: combs[idx].capacity)
             }
             for k in 0..<allpassCount {
                 let idx = side * allpassCount + k
-                let base = Float(FreeverbUnit.allpassTuning[k] + spread)
-                let size = max(1, min(allpasses[idx].capacity - 1, Int(base * factor)))
-                allpasses[idx].size = size
                 allpasses[idx].index = 0
                 allpasses[idx].buffer.update(repeating: 0, count: allpasses[idx].capacity)
             }
         }
 
+        state.pointee.filtL = 0
+        state.pointee.filtR = 0
         state.pointee.preIndex = 0
         state.pointee.preL.update(repeating: 0, count: state.pointee.preCapacity)
         state.pointee.preR.update(repeating: 0, count: state.pointee.preCapacity)
@@ -440,6 +514,11 @@ public final class FreeverbUnit: AUAudioUnit {
             let wet1 = s.wet1
             let wet2 = s.wet2
             let dry = s.dry
+            let filterCoef = s.filterCoef
+            let preWet = s.preWet
+            let preDry = s.preDry
+            var filtL = s.filtL
+            var filtR = s.filtR
 
             let preL = s.preL
             let preR = s.preR
@@ -456,10 +535,16 @@ public final class FreeverbUnit: AUAudioUnit {
                 preR[preIndex] = dryR
                 var readIndex = preIndex - preSize
                 if readIndex < 0 { readIndex += preSize + 1 }
-                let wetInL = preL[readIndex]
-                let wetInR = preR[readIndex]
+                let delayedL = preL[readIndex]
+                let delayedR = preR[readIndex]
                 preIndex += 1
                 if preIndex > preSize { preIndex = 0 }
+
+                // Pre-Delay Mix blends the delayed copy against the immediate
+                // one, so the control spans "the tank hears the note as it
+                // happens" through to "only the delayed copy reaches it".
+                let wetInL = delayedL * preWet + dryL * preDry
+                let wetInR = delayedR * preWet + dryR * preDry
 
                 let input = (wetInL + wetInR) * gain
 
@@ -470,6 +555,10 @@ public final class FreeverbUnit: AUAudioUnit {
                 var k = 0
                 while k < combCount {
                     let li = k
+                    // Size can be dragged while this loop is running, which
+                    // shortens the line under the index. Clamping on read is
+                    // what keeps that from walking off the end of the buffer.
+                    if combs[li].index >= combs[li].size { combs[li].index = 0 }
                     let lOut = combs[li].buffer[combs[li].index]
                     let lStore = lOut * damp2 + combs[li].store * damp1
                     combs[li].store = lStore
@@ -479,6 +568,7 @@ public final class FreeverbUnit: AUAudioUnit {
                     accL += lOut
 
                     let ri = combCount + k
+                    if combs[ri].index >= combs[ri].size { combs[ri].index = 0 }
                     let rOut = combs[ri].buffer[combs[ri].index]
                     let rStore = rOut * damp2 + combs[ri].store * damp1
                     combs[ri].store = rStore
@@ -494,6 +584,7 @@ public final class FreeverbUnit: AUAudioUnit {
                 var a = 0
                 while a < allpassCount {
                     let li = a
+                    if allpasses[li].index >= allpasses[li].size { allpasses[li].index = 0 }
                     let lBuf = allpasses[li].buffer[allpasses[li].index]
                     let lNew = -accL + lBuf
                     allpasses[li].buffer[allpasses[li].index] = accL + lBuf * 0.5
@@ -502,6 +593,7 @@ public final class FreeverbUnit: AUAudioUnit {
                     accL = lNew
 
                     let ri = allpassCount + a
+                    if allpasses[ri].index >= allpasses[ri].size { allpasses[ri].index = 0 }
                     let rBuf = allpasses[ri].buffer[allpasses[ri].index]
                     let rNew = -accR + rBuf
                     allpasses[ri].buffer[allpasses[ri].index] = accR + rBuf * 0.5
@@ -512,6 +604,13 @@ public final class FreeverbUnit: AUAudioUnit {
                     a += 1
                 }
 
+                // Filter: one pole across the wet path only, so the dry signal
+                // keeps its top end however dark the tail is made.
+                filtL += (accL - filtL) * filterCoef
+                filtR += (accR - filtR) * filterCoef
+                accL = filtL
+                accR = filtR
+
                 let mixedL = accL * wet1 + accR * wet2 + dryL * dry
                 let mixedR = accR * wet1 + accL * wet2 + dryR * dry
 
@@ -521,6 +620,8 @@ public final class FreeverbUnit: AUAudioUnit {
             }
 
             st.pointee.preIndex = preIndex
+            st.pointee.filtL = filtL
+            st.pointee.filtR = filtR
             return noErr
         }
     }

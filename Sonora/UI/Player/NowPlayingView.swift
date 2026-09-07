@@ -356,7 +356,7 @@ struct NowPlayingView: View {
                 Label(settings.selectedPresetName, systemImage: "waveform")
             }
             if settings.reverbEnabled {
-                Label(settings.reverbRoom.label, systemImage: "square.stack.3d.down.right")
+                Label(settings.reverbPresetName, systemImage: "square.stack.3d.down.right")
             }
             if settings.spatialEnabled {
                 Label("Spatial", systemImage: "airpodspro")

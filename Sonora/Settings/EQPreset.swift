@@ -201,6 +201,22 @@ enum ReverbRoom: Int, Codable, CaseIterable, Identifiable {
         }
     }
 
+    /// Closest room to a normalised size, for the AUReverb2 engine. Its
+    /// presets are the only way to set that unit's dimensions, so the Size
+    /// control has to be quantised onto them.
+    static func forSize(_ size: Double) -> ReverbRoom {
+        switch max(0, min(1, size)) {
+        case ..<0.12: return .smallRoom
+        case ..<0.25: return .mediumRoom
+        case ..<0.38: return .largeRoom
+        case ..<0.50: return .mediumChamber
+        case ..<0.62: return .largeChamber
+        case ..<0.74: return .mediumHall
+        case ..<0.86: return .largeHall
+        default:      return .cathedral
+        }
+    }
+
     /// Advanced-engine equivalents: (minDelay, maxDelay, decayAt0Hz, decayAtNyquist)
     var reverb2Shape: (Float, Float, Float, Float) {
         switch self {
