@@ -521,7 +521,9 @@ final class MediaLibrary: ObservableObject {
         saveWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in self?.save() }
         saveWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: item)
+        // Rewriting the whole library index is not free; batch play counts and
+        // ratings. The app also saves when it goes to the background.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: item)
     }
 
     func wipeLibrary() {
