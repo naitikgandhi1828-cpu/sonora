@@ -59,6 +59,19 @@ enum ShuffleMode: Int, Codable, CaseIterable, Identifiable {
     var next: ShuffleMode { ShuffleMode(rawValue: (rawValue + 1) % 3) ?? .off }
 }
 
+/// How aggressively Sonora trades features for battery life.
+enum PowerMode: Int, Codable, CaseIterable, Identifiable {
+    case off = 0, lowPowerOnly = 1, always = 2
+    var id: Int { rawValue }
+    var label: String {
+        switch self {
+        case .off: return "Off"
+        case .lowPowerOnly: return "In Low Power Mode"
+        case .always: return "Always"
+        }
+    }
+}
+
 @propertyWrapper
 struct Stored<Value: Codable> {
     let key: String
@@ -192,6 +205,29 @@ final class AppSettings: ObservableObject {
     @Published var blurredArtBackground: Bool { didSet { save(blurredArtBackground, "blurBG") } }
     @Published var keepScreenAwake: Bool { didSet { save(keepScreenAwake, "awake") } }
 
+    // MARK: Battery
+
+    @Published var powerMode: PowerMode { didSet { save(powerMode.rawValue, "powerMode") } }
+    /// Mirrors iOS Low Power Mode so views can react when it flips.
+    @Published private(set) var systemLowPowerMode: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled
+
+    /// True when Sonora should run in its lightest configuration.
+    var batterySaverActive: Bool {
+        switch powerMode {
+        case .off: return false
+        case .always: return true
+        case .lowPowerOnly: return systemLowPowerMode
+        }
+    }
+
+    /// Visualizer is shown only when the user wants it and battery saver is off.
+    var visualizerAllowed: Bool { showVisualizer && !batterySaverActive }
+
+    /// Screen stays awake only when asked for and battery saver is off.
+    var effectiveKeepScreenAwake: Bool { keepScreenAwake && !batterySaverActive }
+
+    private var powerObserver: NSObjectProtocol?
+
     // MARK: Sleep timer
 
     @Published var sleepFadeOut: Bool { didSet { save(sleepFadeOut, "sleepFade") } }
@@ -296,10 +332,19 @@ final class AppSettings: ObservableObject {
         showVisualizer = b("visualizer", true)
         blurredArtBackground = b("blurBG", true)
         keepScreenAwake = b("awake", false)
+        powerMode = PowerMode(rawValue: i("powerMode", PowerMode.always.rawValue)) ?? .always
 
         sleepFadeOut = b("sleepFade", true)
         sleepFadeSeconds = n("sleepFadeSec", 20)
         sleepFinishTrack = b("sleepFinish", false)
+
+        powerObserver = NotificationCenter.default.addObserver(
+            forName: .NSProcessInfoPowerStateDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.systemLowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
+        }
     }
 
     private func save<T: Codable>(_ value: T, _ key: String) {
