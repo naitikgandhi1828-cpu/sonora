@@ -22,6 +22,7 @@ struct SonoraApp: App {
     init() {
         // The audio session has to exist before the engine is built.
         AudioSessionManager.shared.activate()
+        PowerState.startMonitoring()
 
         let settings = AppSettings.shared
         let library = MediaLibrary(settings: settings)
