@@ -177,6 +177,26 @@ public final class FreeverbUnit: AUAudioUnit {
 
     private let state = UnsafeMutablePointer<FVState>.allocate(capacity: 1)
     private let maxFrames = 4096
+
+    /// Bypass state shared with the render thread. When the host bypasses
+    /// this unit the render block copies input to output and skips all DSP,
+    /// instead of running the full algorithm and mixing it away.
+    private let bypassState: UnsafeMutablePointer<BypassState> = {
+        let p = UnsafeMutablePointer<BypassState>.allocate(capacity: 1)
+        p.initialize(to: BypassState())
+        return p
+    }()
+
+    public override var shouldBypassEffect: Bool {
+        get { bypassState.pointee.requested }
+        set {
+            bypassState.pointee.requested = newValue
+            // The framework may bypass at its own level and never call our
+            // render block, so mark the tail stale here too.
+            if newValue { bypassState.pointee.wasBypassed = true }
+            super.shouldBypassEffect = newValue
+        }
+    }
     private var scratchABL: UnsafeMutableAudioBufferListPointer
     private var scratchMemory: [UnsafeMutableRawPointer] = []
     private var delayMemory: [UnsafeMutablePointer<Float>] = []
@@ -277,6 +297,8 @@ public final class FreeverbUnit: AUAudioUnit {
         free(scratchABL.unsafeMutablePointer)
         state.deinitialize(count: 1)
         state.deallocate()
+        bypassState.deinitialize(count: 1)
+        bypassState.deallocate()
     }
 
     // MARK: Parameters
@@ -460,11 +482,45 @@ public final class FreeverbUnit: AUAudioUnit {
 
     public override var canProcessInPlace: Bool { true }
 
+    /// Zeroes the delay lines and filter memories. Realtime-safe: it only
+    /// writes into memory allocated up front. Only the active region of each
+    /// line is cleared (plus one sample of slack), clamped to its capacity,
+    /// so the cost on the render thread tracks the current room size rather
+    /// than the worst-case allocation.
+    fileprivate static func clearHistory(_ state: UnsafeMutablePointer<FVState>) {
+        let combCount = FreeverbUnit.combCount
+        let allpassCount = FreeverbUnit.allpassCount
+        let combs = state.pointee.combs
+        let allpasses = state.pointee.allpasses
+        for side in 0..<2 {
+            for k in 0..<combCount {
+                let idx = side * combCount + k
+                combs[idx].index = 0
+                combs[idx].store = 0
+                let n = min(combs[idx].capacity, combs[idx].size + 1)
+                combs[idx].buffer.update(repeating: 0, count: n)
+            }
+            for k in 0..<allpassCount {
+                let idx = side * allpassCount + k
+                allpasses[idx].index = 0
+                let n = min(allpasses[idx].capacity, allpasses[idx].size + 1)
+                allpasses[idx].buffer.update(repeating: 0, count: n)
+            }
+        }
+        state.pointee.filtL = 0
+        state.pointee.filtR = 0
+        state.pointee.preIndex = 0
+        let preCount = min(state.pointee.preCapacity, state.pointee.preSize + 1)
+        state.pointee.preL.update(repeating: 0, count: preCount)
+        state.pointee.preR.update(repeating: 0, count: preCount)
+    }
+
     // MARK: Render
 
     public override var internalRenderBlock: AUInternalRenderBlock {
 
         let st = state
+        let bypass = bypassState
         let ablPtr = scratchABL.unsafeMutablePointer
         let frameCap = maxFrames
         let combCount = FreeverbUnit.combCount
@@ -504,6 +560,20 @@ public final class FreeverbUnit: AUAudioUnit {
                 return kAudioUnitErr_NoConnection
             }
             let outR = (outCount > 1 ? outList[1].mData?.assumingMemoryBound(to: Float.self) : nil) ?? outL
+
+            // Bypassed: pass the audio straight through and do no DSP at all.
+            if bypass.pointee.requested {
+                if outL != inL { outL.update(from: inL, count: frames) }
+                if outR != outL && outR != inR { outR.update(from: inR, count: frames) }
+                bypass.pointee.wasBypassed = true
+                return noErr
+            }
+            // Coming back from bypass: the delay lines still hold audio from
+            // before it was switched off, so start from silence instead.
+            if bypass.pointee.wasBypassed {
+                bypass.pointee.wasBypassed = false
+                FreeverbUnit.clearHistory(st)
+            }
 
             let s = st.pointee
             let combs = s.combs
@@ -625,4 +695,10 @@ public final class FreeverbUnit: AUAudioUnit {
             return noErr
         }
     }
+}
+
+/// Render-thread view of the host's bypass switch.
+private struct BypassState {
+    var requested = false
+    var wasBypassed = false
 }

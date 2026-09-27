@@ -19,15 +19,34 @@ final class PlaybackController: ObservableObject {
 
     @Published private(set) var queue: [UUID] = []
     @Published private(set) var currentIndex: Int = -1
-    @Published private(set) var isPlaying = false
-    @Published private(set) var position: TimeInterval = 0
-    @Published private(set) var duration: TimeInterval = 0
+    @Published private(set) var isPlaying = false {
+        didSet {
+            guard oldValue != isPlaying else { return }
+            updateMeterTap()
+            applyScreenAwake()
+        }
+    }
     @Published private(set) var currentTrack: Track?
     @Published private(set) var currentArtwork: UIImage?
     @Published private(set) var errorMessage: String?
     /// Meter levels are deliberately NOT @Published here — see MeterState.
     let meters = MeterState()
     @Published private(set) var queueSourceName: String = ""
+
+    // MARK: High-frequency values
+    //
+    // Position changes several times a second. It is NOT @Published here,
+    // because every view observing the controller (the library lists
+    // included) would re-render on each change. Views that show progress
+    // observe `clock` instead.
+
+    let clock = PlaybackClock()
+
+    private(set) var position: TimeInterval = 0 { didSet { syncClock() } }
+    private(set) var duration: TimeInterval = 0 { didSet { syncClock() } }
+
+    private var isForeground = true
+    private var visualizerViewers = 0
 
     /// The order the queue was built in, before shuffling.
     private var unshuffledQueue: [UUID] = []
@@ -70,35 +89,25 @@ final class PlaybackController: ObservableObject {
         wireRemoteCommands()
         wireSleepTimer()
         observeSettings()
+        observeAppLifecycle()
         restoreState()
     }
-
-    /// Wall-clock of the last `position` publish, for the throttle below.
-    private var lastPositionPublish: CFTimeInterval = 0
 
     private func wireEngine() {
         engine.onTick = { [weak self] pos, dur in
             guard let self, !self.isScrubbing else { return }
-
-            // The engine ticks at 25 Hz because crossfade timing needs it, but
-            // `position` lives on this ObservableObject, so every publish
-            // invalidates every view observing the player — the library list
-            // included. A progress bar cannot show more than ~10 Hz anyway, so
-            // throttle to that and cut SwiftUI's work by 60%. A jump larger
-            // than a second (seek, track change) always goes through
-            // immediately so the UI never looks stuck.
-            let now = CACurrentMediaTime()
-            let jumped = abs(pos - self.position) > 1.0
-            guard jumped || now - self.lastPositionPublish >= 0.1 else { return }
-            self.lastPositionPublish = now
-
+            // The engine now ticks at 4 Hz on screen and 1 Hz in the
+            // background, and `position` only reaches views through `clock`,
+            // so no throttle is needed here.
             self.position = pos
             let newDuration = dur > 0 ? dur : (self.currentTrack?.duration ?? 0)
-            // Assigning an unchanged value still fires objectWillChange.
             if abs(newDuration - self.duration) > 0.001 {
                 self.duration = newDuration
             }
-            self.refreshNowPlaying(throttled: true)
+            // The lock screen extrapolates elapsed time from the rate we give
+            // it, so it only needs updating on real changes (play, pause,
+            // seek, track change) — not on every tick.
+            self.saveState()
         }
         engine.onAdvanced = { [weak self] trackID in
             guard let self else { return }
@@ -107,6 +116,7 @@ final class PlaybackController: ObservableObject {
             }
             self.setCurrent(trackID: trackID)
             self.library.markPlayed(trackID)
+            self.position = self.engine.currentTime
             self.refreshNowPlaying()
         }
         engine.onFinished = { [weak self] in
@@ -119,10 +129,77 @@ final class PlaybackController: ObservableObject {
         engine.onError = { [weak self] message in
             self?.errorMessage = message
         }
-        engine.setMeterTap { [weak self] levels in
-            guard let self, self.settings.showVisualizer else { return }
-            self.meters.levels = levels
+        // Interruptions and headphone unplug/plug pause or resume inside the
+        // engine; mirror that here so the UI and lock screen stay truthful.
+        engine.onPlayStateChanged = { [weak self] playing in
+            guard let self, self.isPlaying != playing else { return }
+            self.position = self.engine.currentTime
+            self.isPlaying = playing
+            self.refreshNowPlaying()
         }
+        // The meter tap is no longer installed here permanently; see
+        // updateMeterTap(), which only runs it while the visualizer is visible.
+    }
+
+    // MARK: - Power-aware UI plumbing
+
+    private func syncClock() {
+        guard isForeground else { return }   // nobody can see it in the background
+        clock.update(position: position, duration: duration)
+    }
+
+    private func observeAppLifecycle() {
+        let nc = NotificationCenter.default
+        nc.publisher(for: UIApplication.didEnterBackgroundNotification)
+            .sink { [weak self] _ in self?.setForeground(false) }
+            .store(in: &cancellables)
+        nc.publisher(for: UIApplication.willEnterForegroundNotification)
+            .sink { [weak self] _ in self?.setForeground(true) }
+            .store(in: &cancellables)
+    }
+
+    private func setForeground(_ foreground: Bool) {
+        guard isForeground != foreground else { return }
+        isForeground = foreground
+        engine.isForeground = foreground
+        if foreground {
+            clock.update(position: position, duration: duration)
+        }
+        updateMeterTap()
+    }
+
+    /// Called by the visualizer as it appears and disappears. A counter, so a
+    /// new instance appearing before the old one disappears never switches
+    /// the tap off under visible bars.
+    func setVisualizerVisible(_ visible: Bool) {
+        visualizerViewers = max(0, visualizerViewers + (visible ? 1 : -1))
+        updateMeterTap()
+    }
+
+    /// The meter tap costs CPU on every audio buffer, so it only exists while
+    /// the visualizer is actually on screen and music is playing.
+    private func updateMeterTap() {
+        let wanted = visualizerViewers > 0 && isForeground && isPlaying && settings.visualizerAllowed
+        guard wanted != engine.isMeterTapInstalled else { return }
+        if wanted {
+            engine.setMeterTap { [weak self] levels in
+                self?.meters.levels = levels
+            }
+        } else {
+            engine.setMeterTap(nil)
+            if meters.levels.contains(where: { $0 != 0 }) {
+                meters.levels = Array(repeating: 0, count: meters.levels.count)
+            }
+        }
+    }
+
+    private func powerSettingsChanged() {
+        updateMeterTap()
+        applyScreenAwake()
+    }
+
+    private func applyScreenAwake() {
+        UIApplication.shared.isIdleTimerDisabled = settings.effectiveKeepScreenAwake && isPlaying
     }
 
     private func wireRemoteCommands() {
@@ -146,6 +223,7 @@ final class PlaybackController: ObservableObject {
             guard let self, let id = self.currentTrack?.id else { return }
             self.library.setRating(rating, for: id)
             self.setCurrent(trackID: id)
+            self.refreshNowPlaying()
         }
     }
 
@@ -216,8 +294,29 @@ final class PlaybackController: ObservableObject {
             .sink { [weak self] _ in self?.engine.invalidateChain() }
             .store(in: &cancellables)
 
+        // Anything that changes what battery saver allows. @Published fires
+        // before the new value is stored, so hop to the next run-loop turn.
         settings.$keepScreenAwake
-            .sink { UIApplication.shared.isIdleTimerDisabled = $0 }
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.powerSettingsChanged() }
+            .store(in: &cancellables)
+        settings.$showVisualizer
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.powerSettingsChanged() }
+            .store(in: &cancellables)
+        settings.$powerMode
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.powerSettingsChanged() }
+            .store(in: &cancellables)
+        settings.$systemLowPowerMode
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.powerSettingsChanged() }
+            .store(in: &cancellables)
+
+        settings.$playbackRate
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.refreshNowPlaying() }
             .store(in: &cancellables)
     }
 
@@ -307,12 +406,14 @@ final class PlaybackController: ObservableObject {
         }
         engine.play()
         isPlaying = true
+        position = engine.currentTime
         refreshNowPlaying()
     }
 
     func pause() {
         engine.pause()
         isPlaying = false
+        position = engine.currentTime
         refreshNowPlaying()
     }
 
@@ -386,8 +487,12 @@ final class PlaybackController: ObservableObject {
     var trackLength: TimeInterval { trackEnd - trackStart }
 
     /// How far into the track we are.
-    var elapsed: TimeInterval {
-        min(max(0, position - trackStart), trackLength)
+    var elapsed: TimeInterval { elapsed(at: position) }
+
+    /// Track-relative time for a file position (used by views that read the
+    /// live position from `clock`).
+    func elapsed(at filePosition: TimeInterval) -> TimeInterval {
+        min(max(0, filePosition - trackStart), trackLength)
     }
 
     // MARK: - Queue neighbours (for the player's swipe transition)
@@ -437,7 +542,7 @@ final class PlaybackController: ObservableObject {
     /// Skipping back off the front of a cue track used to land in the previous
     /// track's audio while the UI still showed this one.
     private func skip(by seconds: TimeInterval) {
-        seek(to: position + seconds)
+        seek(to: engine.currentTime + seconds)
     }
 
     func cycleRepeat() { settings.repeatMode = settings.repeatMode.next }
@@ -452,6 +557,7 @@ final class PlaybackController: ObservableObject {
             return
         }
         setCurrent(trackID: queue[currentIndex])
+        position = item.startTime
         engine.load(item: item, autoplay: autoplay)
         isPlaying = autoplay
         library.markPlayed(queue[currentIndex])
@@ -506,11 +612,13 @@ final class PlaybackController: ObservableObject {
 
     private func analyzeGainIfNeeded(for trackID: UUID) {
         guard settings.autoAnalyzeGain,
+              PowerState.mayRunHeavyWork(settings: settings),
               let track = library.track(id: trackID),
               track.replayGainTrack == nil,
               let url = library.url(for: track) else { return }
 
-        Task.detached(priority: .utility) {
+        // .background keeps this on the efficiency cores.
+        Task.detached(priority: .background) {
             guard let result = LoudnessAnalyzer.analyze(url: url,
                                                         startTime: track.cueStart ?? 0,
                                                         endTime: track.cueEnd) else { return }
@@ -555,8 +663,12 @@ final class PlaybackController: ObservableObject {
             return
         }
         guard let target = indexAfter(currentIndex) else {
+            // End of the queue: let the engine go idle instead of rendering
+            // silence, and re-arm the track so a later tap on play works.
+            engine.pause(fade: false)
+            engine.seek(to: currentTrack?.cueStart ?? 0)
             isPlaying = false
-            position = 0
+            position = currentTrack?.cueStart ?? 0
             refreshNowPlaying()
             return
         }
@@ -612,12 +724,10 @@ final class PlaybackController: ObservableObject {
 
     // MARK: - Now playing
 
-    private var lastNowPlayingUpdate: CFTimeInterval = 0
-
-    private func refreshNowPlaying(throttled: Bool = false) {
-        let now = CACurrentMediaTime()
-        if throttled && now - lastNowPlayingUpdate < 1.0 { return }
-        lastNowPlayingUpdate = now
+    private func refreshNowPlaying() {
+        // Hand the lock screen a fresh elapsed time rather than whatever the
+        // last (possibly 1 Hz background) tick left in `position`.
+        if !isScrubbing, currentTrack != nil { position = engine.currentTime }
         NowPlayingCenter.shared.update(track: currentTrack,
                                        artwork: currentArtwork,
                                        position: elapsed,
@@ -647,7 +757,9 @@ final class PlaybackController: ObservableObject {
 
     private func saveState() {
         let now = CACurrentMediaTime()
-        guard now - lastStateSave > 5 else { return }
+        // Resume state is also written when the app backgrounds, so a slow
+        // cadence here only guards against crashes.
+        guard now - lastStateSave > 30 else { return }
         lastStateSave = now
         let state = SavedState(queue: queue, unshuffled: unshuffledQueue,
                                index: currentIndex, position: position,

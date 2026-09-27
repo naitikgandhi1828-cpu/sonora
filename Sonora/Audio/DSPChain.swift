@@ -239,6 +239,9 @@ final class DSPChain {
         // costs nothing and avoids stacking two reverbs in series.
         reverb.setBypassed(!on || useFreeverb)
         freeverb?.bypass = !on || !useFreeverb
+        // Set on the AU directly too, so the unit's own fast path (which
+        // skips all DSP) engages whether or not AVFoundation forwards it.
+        freeverb?.auAudioUnit.shouldBypassEffect = !on || !useFreeverb
 
         guard on else {
             // Belt and braces, for the same reason as the EQ: an effect that is
@@ -289,6 +292,7 @@ final class DSPChain {
         guard let spatial else { return }
         let on = settings.spatialEnabled
         spatial.bypass = !on
+        spatial.auAudioUnit.shouldBypassEffect = !on
 
         func set(_ addr: SpatialParam, _ value: Float) {
             spatial.auAudioUnit.parameterTree?.parameter(withAddress: addr.rawValue)?.value = value

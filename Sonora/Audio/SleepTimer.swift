@@ -20,6 +20,7 @@ final class SleepTimer: ObservableObject {
     var onExpire: (() -> Void)?
 
     private var timer: Timer?
+    private var timerInterval: TimeInterval = 1.0
     private var endDate: Date?
     private var fadeSeconds: Double = 0
 
@@ -32,8 +33,16 @@ final class SleepTimer: ObservableObject {
         finishTrackFirst = finishTrack
         endDate = Date().addingTimeInterval(duration)
         isActive = true
+        schedule(interval: 1.0)
+    }
 
-        let t = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.tick() }
+    /// 1 Hz is enough for the countdown; only the fade window needs finer
+    /// steps so the volume ramp stays smooth.
+    private func schedule(interval: TimeInterval) {
+        timer?.invalidate()
+        timerInterval = interval
+        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in self?.tick() }
+        t.tolerance = interval * 0.2
         RunLoop.main.add(t, forMode: .common)
         timer = t
     }
@@ -58,6 +67,7 @@ final class SleepTimer: ObservableObject {
         remaining = max(0, end.timeIntervalSinceNow)
 
         if fadeSeconds > 0 && remaining <= fadeSeconds {
+            if timerInterval > 0.5 { schedule(interval: 0.5) }
             onFade?(max(0, remaining / fadeSeconds))
         }
 

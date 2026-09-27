@@ -80,6 +80,20 @@ final class PlaybackEngine {
     private var crossfadeRamp: (start: CFTimeInterval, duration: Double)?
 
     private var ticker: Timer?
+    private var tickerInterval: TimeInterval?
+
+    /// Set by the controller. In the background nobody sees the playhead,
+    /// so the ticker drops to 1 Hz housekeeping.
+    var isForeground = true { didSet { if oldValue != isForeground { updateTicker() } } }
+
+    /// Last good position reading. A paused (idle) engine reports no render
+    /// time, so this is what `currentTime` falls back to.
+    private var frozenTime: TimeInterval?
+    /// Host time at which `frozenTime` was last captured from a live reading.
+    private var frozenAt: CFTimeInterval = 0
+    private var idleWorkItem: DispatchWorkItem?
+    private(set) var isMeterTapInstalled = false
+
     private var configObserver: NSObjectProtocol?
     /// Guards against a configuration-change notification arriving while we are
     /// part-way through rebuilding the graph for the last one.
@@ -128,10 +142,13 @@ final class PlaybackEngine {
     var onFinished: (() -> Void)?
     /// Asked when the engine wants a track to chain or crossfade into.
     var provideNextItem: (() -> PlayableItem?)?
-    /// Position updates, ~25 Hz, on the main queue.
+    /// Position updates on the main queue: 4 Hz in the foreground, 1 Hz in
+    /// the background, 30 Hz only while a fade or crossfade is running.
     var onTick: ((TimeInterval, TimeInterval) -> Void)?
     /// A hard failure that the UI should surface.
     var onError: ((String) -> Void)?
+    /// Play state changed (including engine-initiated pauses and resumes).
+    var onPlayStateChanged: ((Bool) -> Void)?
 
     // MARK: - Init
 
@@ -145,7 +162,7 @@ final class PlaybackEngine {
         buildGraph()
         hookSession()
         hookEngineConfiguration()
-        startTicker()
+        // No ticker and no running engine until something actually plays.
     }
 
     deinit {
@@ -263,6 +280,8 @@ final class PlaybackEngine {
     }
 
     private func ensureEngineRunning() {
+        idleWorkItem?.cancel()
+        idleWorkItem = nil
         guard !engine.isRunning else { return }
         do {
             engine.prepare()
@@ -270,6 +289,32 @@ final class PlaybackEngine {
         } catch {
             onError?("Audio engine failed to start: \(error.localizedDescription)")
         }
+    }
+
+    // MARK: - Idle power management
+
+    /// A running AVAudioEngine keeps the audio hardware and render thread
+    /// awake even when every player is paused. Apple's guidance is to pause
+    /// the engine whenever nothing needs to be heard, so we do that a few
+    /// seconds after playback stops (the delay avoids churn on quick toggles).
+    private func scheduleEngineIdle() {
+        idleWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in self?.pauseEngineIfIdle() }
+        idleWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: item)
+    }
+
+    private func pauseEngineIfIdle() {
+        idleWorkItem = nil
+        guard !isPlaying, engine.isRunning else { return }
+        // Still ramping volume: try again once the ramp is done.
+        if fade != nil || crossfadeRamp != nil {
+            scheduleEngineIdle()
+            return
+        }
+        frozenTime = currentTime
+        engine.pause()
+        updateTicker()
     }
 
     private func stopEngineOnly() {
@@ -289,9 +334,12 @@ final class PlaybackEngine {
             return
         }
 
-        // Try to run the hardware at the file's native rate.
+        // Try to run the hardware at the file's native rate. Under battery
+        // saver we cap at 48 kHz: hi-res rates double or quadruple the work
+        // every effect in the chain does, for no audible gain on most outputs.
         let fileRate = file.processingFormat.sampleRate
-        let achieved = session.preferSampleRate(fileRate)
+        let targetRate = settings.batterySaverActive ? min(fileRate, 48_000) : fileRate
+        let achieved = session.preferSampleRate(targetRate)
         // AVAudioSession.sampleRate reports 0 when the session has no active
         // route (during an interruption, or mid route change). Building an
         // AVAudioFormat at 0 Hz returns nil, so the force-unwrap below used to
@@ -323,6 +371,7 @@ final class PlaybackEngine {
         crossfadeScheduleID = nil
         nextScheduleFrame = 0
         awaitingFirstRender = true
+        frozenTime = nil
         openFiles = [item.trackID: file]
 
         currentFormat = file.processingFormat
@@ -334,8 +383,18 @@ final class PlaybackEngine {
 
         guard scheduleOnActivePlayer(item: item, file: file) else { return }
 
-        ensureEngineRunning()
-        if autoplay { play() } else { isPlaying = false }
+        if autoplay {
+            play()
+        } else {
+            // Loading without playing (launch restore, seek while paused)
+            // must not leave the engine rendering silence.
+            isPlaying = false
+            scheduleEngineIdle()
+            updateTicker()
+            // No ticker runs while paused, so publish the position and real
+            // duration once here.
+            onTick?(currentTime, currentDuration)
+        }
         maybeChainNext()
     }
 
@@ -431,8 +490,15 @@ final class PlaybackEngine {
 
     func play() {
         guard currentItem != nil else { return }
+        let wasPlaying = isPlaying
+        // Another app may have taken the session while we were paused (lock
+        // screen resume), so reclaim it before starting the engine.
+        session.activate()
         ensureEngineRunning()
         if !player.isPlaying { player.play() }
+        // Re-anchor extrapolation: frozenTime was captured at pause, and the
+        // time spent paused must not count as elapsed playback.
+        if !wasPlaying { frozenAt = CACurrentMediaTime() }
         isPlaying = true
         if settings.fadeOnPauseResume {
             activeGain.volume = 0
@@ -441,18 +507,28 @@ final class PlaybackEngine {
         } else {
             activeGain.volume = gainLinear(currentItem?.gainDB ?? 0)
         }
+        updateTicker()
+        if !wasPlaying { onPlayStateChanged?(true) }
     }
 
     func pause(fade doFade: Bool = true) {
         guard isPlaying else { isPlaying = false; return }
+        // Pausing mid-crossfade: finish the blend now, otherwise the incoming
+        // player keeps playing while the app says "paused".
+        if crossfadeRamp != nil { advanceCrossfade(now: .greatestFiniteMagnitude) }
+        frozenTime = currentTime
         isPlaying = false
         if doFade && settings.fadeOnPauseResume {
             startFade(on: activeGain, to: 0, duration: settings.pauseFadeMS / 1000) { [weak self] in
                 self?.player.pause()
+                self?.scheduleEngineIdle()
             }
         } else {
             player.pause()
+            scheduleEngineIdle()
         }
+        updateTicker()
+        onPlayStateChanged?(false)
     }
 
     func togglePlayPause() { isPlaying ? pause() : play() }
@@ -468,7 +544,13 @@ final class PlaybackEngine {
         currentItem = nil
         chainedItem = nil
         openFiles.removeAll()
+        frozenTime = nil
+        fade = nil
+        crossfadeRamp = nil
+        pendingCrossfadeItem = nil
         onTick?(0, 0)
+        scheduleEngineIdle()
+        updateTicker()
     }
 
     func seek(to time: TimeInterval) {
@@ -523,6 +605,7 @@ final class PlaybackEngine {
 
         pendingCrossfadeItem = item
         crossfadeRamp = (CACurrentMediaTime(), max(0.2, settings.crossfadeSeconds))
+        updateTicker()
     }
 
     private func advanceCrossfade(now: CFTimeInterval) {
@@ -564,6 +647,7 @@ final class PlaybackEngine {
                            duration: Double,
                            completion: (() -> Void)? = nil) {
         fade = (node.volume, target, CACurrentMediaTime(), max(0.01, duration), node, completion)
+        updateTicker()
     }
 
     private func advanceFade(now: CFTimeInterval) {
@@ -597,11 +681,23 @@ final class PlaybackEngine {
         // schedule, so report the position we just seeked to rather than a
         // number derived from it.
         if awaitingFirstRender { return currentItem?.startTime ?? 0 }
-        guard let seg = currentSegment(), let frame = nodeSampleTime() else {
-            return currentItem?.startTime ?? 0
+        guard engine.isRunning, let seg = currentSegment(), let frame = nodeSampleTime() else {
+            // Still meant to be playing (e.g. mid route rebuild): extrapolate
+            // from the last good reading so resume lands where the audio was.
+            if isPlaying, let frozen = frozenTime {
+                let elapsed = max(0, CACurrentMediaTime() - frozenAt)
+                let projected = frozen + elapsed * Double(settings.playbackRate)
+                return min(projected, currentDuration)
+            }
+            return frozenTime ?? currentItem?.startTime ?? 0
         }
         let within = Double(frame - seg.startFrame) / seg.sampleRate
-        return max(0, within) + Double(seg.fileStartFrame) / seg.sampleRate
+        let time = max(0, within) + Double(seg.fileStartFrame) / seg.sampleRate
+        // Remember the last good reading for when the engine stops reporting
+        // (paused for idle, stopped by an interruption). load()/stop() reset it.
+        frozenTime = time
+        frozenAt = CACurrentMediaTime()
+        return time
     }
 
     var currentDuration: TimeInterval {
@@ -632,11 +728,25 @@ final class PlaybackEngine {
 
     // MARK: - Ticker
 
-    private func startTicker() {
+    /// Picks the slowest tick rate that still does the job, or none at all.
+    private func desiredTickInterval() -> TimeInterval? {
+        if fade != nil || crossfadeRamp != nil { return 1.0 / 30.0 }   // smooth volume ramps
+        guard isPlaying else { return nil }                              // idle: no wakeups
+        return isForeground ? 0.25 : 1.0
+    }
+
+    private func updateTicker() {
+        let want = desiredTickInterval()
+        if want == tickerInterval && (want == nil) == (ticker == nil) { return }
         ticker?.invalidate()
-        let t = Timer(timeInterval: 1.0 / 25.0, repeats: true) { [weak self] _ in
+        ticker = nil
+        tickerInterval = want
+        guard let want else { return }
+        let t = Timer(timeInterval: want, repeats: true) { [weak self] _ in
             self?.tick()
         }
+        // Tolerance lets iOS coalesce our wakeups with other timers.
+        t.tolerance = want * 0.2
         RunLoop.main.add(t, forMode: .common)
         ticker = t
     }
@@ -646,6 +756,7 @@ final class PlaybackEngine {
         advanceFade(now: now)
         advanceCrossfade(now: now)
 
+        defer { updateTicker() }
         guard isPlaying || currentItem != nil else { return }
 
         // Wait for the node to actually render into the new schedule before
@@ -674,9 +785,11 @@ final class PlaybackEngine {
         // Start a crossfade when the tail is near.
         if settings.crossfadeEnabled,
            isPlaying,
+           !awaitingFirstRender,
            pendingCrossfadeItem == nil,
            !settings.crossfadeOnManualSkipOnly,
-           remainingTime <= settings.crossfadeSeconds,
+           // Look one tick ahead so a slow background ticker never starts late.
+           remainingTime <= settings.crossfadeSeconds + (tickerInterval ?? 0),
            remainingTime > 0.05,
            let next = provideNextItem?() {
             beginCrossfade(to: next)
@@ -688,9 +801,14 @@ final class PlaybackEngine {
     // MARK: - Metering
 
     /// Installs a tap for the visualizer. Pass `nil` to remove it.
+    /// The controller only installs it while the visualizer is on screen.
     func setMeterTap(_ handler: (([Float]) -> Void)?) {
+        // Removing a tap that is not installed is a no-op, so do it
+        // unconditionally in case our flag and the node ever disagree.
         engine.mainMixerNode.removeTap(onBus: 0)
+        isMeterTapInstalled = false
         guard let handler else { return }
+        isMeterTapInstalled = true
         let format = engine.mainMixerNode.outputFormat(forBus: 0)
 
         // Allocated once, up here, instead of on every buffer inside the tap.

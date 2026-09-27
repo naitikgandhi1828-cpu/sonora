@@ -13,7 +13,7 @@ import Accelerate
 
 // MARK: - Waveform
 
-struct WaveformData: Codable {
+struct WaveformData: Codable, Equatable {
     let peaks: [Float]      // 0...1, one value per bucket
     let rms: [Float]        // 0...1
     let bucketCount: Int
@@ -37,7 +37,8 @@ actor WaveformAnalyzer {
                   url: URL,
                   startTime: TimeInterval = 0,
                   endTime: TimeInterval? = nil,
-                  buckets: Int = 360) async -> WaveformData? {
+                  buckets: Int = 360,
+                  allowCompute: Bool = true) async -> WaveformData? {
 
         if let hit = cache[trackID] { return hit }
 
@@ -48,7 +49,8 @@ actor WaveformAnalyzer {
             return decoded
         }
 
-        guard !inFlight.contains(trackID) else { return nil }
+        // Decoding a whole file is the expensive part; skip it when asked.
+        guard allowCompute, !inFlight.contains(trackID) else { return nil }
         inFlight.insert(trackID)
         defer { inFlight.remove(trackID) }
 

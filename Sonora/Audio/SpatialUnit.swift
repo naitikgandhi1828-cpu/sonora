@@ -167,6 +167,26 @@ public final class SpatialUnit: AUAudioUnit {
 
     private let state = UnsafeMutablePointer<SPState>.allocate(capacity: 1)
     private let maxFrames = 4096
+
+    /// Bypass state shared with the render thread. When the host bypasses
+    /// this unit the render block copies input to output and skips all DSP,
+    /// instead of running the full algorithm and mixing it away.
+    private let bypassState: UnsafeMutablePointer<BypassState> = {
+        let p = UnsafeMutablePointer<BypassState>.allocate(capacity: 1)
+        p.initialize(to: BypassState())
+        return p
+    }()
+
+    public override var shouldBypassEffect: Bool {
+        get { bypassState.pointee.requested }
+        set {
+            bypassState.pointee.requested = newValue
+            // The framework may bypass at its own level and never call our
+            // render block, so mark the tail stale here too.
+            if newValue { bypassState.pointee.wasBypassed = true }
+            super.shouldBypassEffect = newValue
+        }
+    }
     private var scratchABL: UnsafeMutableAudioBufferListPointer
     private var scratchMemory: [UnsafeMutableRawPointer] = []
     private var delayMemory: [UnsafeMutablePointer<Float>] = []
@@ -252,6 +272,8 @@ public final class SpatialUnit: AUAudioUnit {
         free(scratchABL.unsafeMutablePointer)
         state.deinitialize(count: 1)
         state.deallocate()
+        bypassState.deinitialize(count: 1)
+        bypassState.deallocate()
     }
 
     // MARK: Parameters
@@ -388,11 +410,29 @@ public final class SpatialUnit: AUAudioUnit {
 
     public override var canProcessInPlace: Bool { true }
 
+    /// Zeroes the delay lines and filter memories. Realtime-safe: it only
+    /// writes into memory allocated up front.
+    fileprivate static func clearHistory(_ state: UnsafeMutablePointer<SPState>) {
+        state.pointee.erIndex = 0
+        state.pointee.itdIndex = 0
+        state.pointee.erL.update(repeating: 0, count: state.pointee.erCapacity)
+        state.pointee.erR.update(repeating: 0, count: state.pointee.erCapacity)
+        state.pointee.itdL.update(repeating: 0, count: state.pointee.itdCapacity)
+        state.pointee.itdR.update(repeating: 0, count: state.pointee.itdCapacity)
+        state.pointee.shadowL = 0
+        state.pointee.shadowR = 0
+        state.pointee.elevLowL = 0
+        state.pointee.elevLowR = 0
+        state.pointee.elevHighL = 0
+        state.pointee.elevHighR = 0
+    }
+
     // MARK: Render
 
     public override var internalRenderBlock: AUInternalRenderBlock {
 
         let st = state
+        let bypass = bypassState
         let ablPtr = scratchABL.unsafeMutablePointer
         let frameCap = maxFrames
         let tapCount = SpatialUnit.tapCount
@@ -430,6 +470,20 @@ public final class SpatialUnit: AUAudioUnit {
                 return kAudioUnitErr_NoConnection
             }
             let outR = (outCount > 1 ? outList[1].mData?.assumingMemoryBound(to: Float.self) : nil) ?? outL
+
+            // Bypassed: pass the audio straight through and do no DSP at all.
+            if bypass.pointee.requested {
+                if outL != inL { outL.update(from: inL, count: frames) }
+                if outR != outL && outR != inR { outR.update(from: inR, count: frames) }
+                bypass.pointee.wasBypassed = true
+                return noErr
+            }
+            // Coming back from bypass: the delay lines still hold audio from
+            // before it was switched off, so start from silence instead.
+            if bypass.pointee.wasBypassed {
+                bypass.pointee.wasBypassed = false
+                SpatialUnit.clearHistory(st)
+            }
 
             let s = st.pointee
             let erL = s.erL
@@ -539,4 +593,10 @@ public final class SpatialUnit: AUAudioUnit {
             return noErr
         }
     }
+}
+
+/// Render-thread view of the host's bypass switch.
+private struct BypassState {
+    var requested = false
+    var wasBypassed = false
 }
