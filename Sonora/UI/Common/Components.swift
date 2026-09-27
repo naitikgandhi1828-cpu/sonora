@@ -132,38 +132,46 @@ struct TrackRow: View {
 struct PlayingIndicator: View {
     var animating: Bool
     var color: Color
-    @State private var phase: Double = 0
+
+    /// Read directly (not from the environment) so the indicator works in
+    /// any context, including context-menu previews.
+    @ObservedObject private var settings = AppSettings.shared
 
     var body: some View {
+        if animating && !settings.batterySaverActive {
+            // A never-ending display-rate animation keeps the screen redrawing
+            // at 60–120 fps. Three tiny bars look the same at 12 fps, and the
+            // timeline stops entirely when this row scrolls away or pauses.
+            TimelineView(.periodic(from: .now, by: 1.0 / 12.0)) { timeline in
+                bars(phase: timeline.date.timeIntervalSinceReferenceDate * (2 * .pi / 1.1))
+            }
+        } else {
+            // Static bars: still clearly marks the current track.
+            bars(phase: animating ? 0.8 : nil)
+        }
+    }
+
+    private func bars(phase: Double?) -> some View {
         GeometryReader { geo in
             let barCount = 3
             let spacing = geo.size.width * 0.16
             let width = (geo.size.width - spacing * CGFloat(barCount - 1)) / CGFloat(barCount)
             HStack(alignment: .bottom, spacing: spacing) {
                 ForEach(0..<barCount, id: \.self) { i in
-                    let h = barHeight(index: i, max: geo.size.height)
                     RoundedRectangle(cornerRadius: width / 2)
                         .fill(color)
-                        .frame(width: width, height: h)
+                        .frame(width: width, height: barHeight(index: i, phase: phase, max: geo.size.height))
                 }
             }
             .frame(maxHeight: .infinity, alignment: .bottom)
         }
-        .onAppear { if animating { start() } }
-        .onChange(of: animating) { _, on in if on { start() } }
     }
 
-    private func barHeight(index: Int, max height: CGFloat) -> CGFloat {
-        guard animating else { return height * 0.35 }
+    private func barHeight(index: Int, phase: Double?, max height: CGFloat) -> CGFloat {
+        guard let phase else { return height * 0.35 }
         let offsets: [Double] = [0, 0.66, 1.33]
         let v = (sin(phase + offsets[index % offsets.count]) + 1) / 2
         return height * (0.25 + 0.75 * v)
-    }
-
-    private func start() {
-        withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) {
-            phase = .pi * 2
-        }
     }
 }
 
