@@ -22,6 +22,7 @@ struct WaveformSeekBar: View {
     var onScrubEnded: (TimeInterval) -> Void = { _ in }
 
     @EnvironmentObject private var themes: ThemeManager
+    @EnvironmentObject private var settings: AppSettings
     @State private var waveform: WaveformData?
     @State private var isScrubbing = false
     @State private var scrubFraction: Double = 0
@@ -55,9 +56,17 @@ struct WaveformSeekBar: View {
 
             ZStack(alignment: .leading) {
                 if let waveform, !waveform.peaks.isEmpty {
-                    Canvas { context, size in
-                        draw(waveform: waveform, in: context, size: size, progress: fraction)
-                    }
+                    // The bars are drawn once per track into two cached layers.
+                    // Playback only moves a mask, so each tick costs almost
+                    // nothing instead of redrawing 600 rounded paths.
+                    WaveformLayer(waveform: waveform,
+                                  color: themes.theme.textSecondary.opacity(0.30))
+                        .equatable()
+                    WaveformLayer(waveform: waveform, color: themes.accent)
+                        .equatable()
+                        .mask(alignment: .leading) {
+                            Rectangle().frame(width: max(0, width * fraction))
+                        }
                 } else {
                     Capsule()
                         .fill(themes.theme.textSecondary.opacity(0.22))
@@ -69,17 +78,15 @@ struct WaveformSeekBar: View {
                         .frame(maxHeight: .infinity, alignment: .center)
                 }
 
-                // Playhead. `position` only publishes ten times a second, which
-                // reads as a stutter at this size, so interpolate between
-                // updates - but never while the finger is down, where the
-                // playhead has to track the touch exactly.
+                // Playhead. Not animated between ticks: interpolating kept the
+                // display redrawing at full frame rate for as long as music
+                // played. At a few pixels per second the steps are invisible.
                 Rectangle()
                     .fill(themes.theme.textPrimary)
                     .frame(width: 2, height: height)
                     .offset(x: max(0, min(width - 2, width * fraction)))
                     .opacity(isScrubbing ? 1 : 0.75)
                     .shadow(color: .black.opacity(0.4), radius: 2)
-                    .animation(isScrubbing ? nil : .linear(duration: 0.1), value: fraction)
             }
             .contentShape(Rectangle())
             .gesture(
@@ -101,35 +108,11 @@ struct WaveformSeekBar: View {
                     }
             )
         }
-        .task(id: trackID) { await loadWaveform() }
-    }
-
-    private func draw(waveform: WaveformData, in context: GraphicsContext, size: CGSize, progress: Double) {
-        let count = waveform.peaks.count
-        guard count > 0 else { return }
-        let barWidth = max(1.0, size.width / Double(count) * 0.62)
-        let spacing = size.width / Double(count)
-        let mid = size.height / 2
-        let playedX = size.width * progress
-
-        let playedColor = themes.accent
-        let pendingColor = themes.theme.textSecondary.opacity(0.30)
-
-        for i in 0..<count {
-            let x = Double(i) * spacing
-            let peak = Double(waveform.peaks[i])
-            let rms = Double(waveform.rms[i])
-            let h = max(2.0, peak * (size.height - 4))
-            let innerH = max(1.5, rms * (size.height - 4))
-
-            let rect = CGRect(x: x, y: mid - h / 2, width: barWidth, height: h)
-            let innerRect = CGRect(x: x, y: mid - innerH / 2, width: barWidth, height: innerH)
-            let path = Path(roundedRect: rect, cornerRadius: barWidth / 2)
-            let innerPath = Path(roundedRect: innerRect, cornerRadius: barWidth / 2)
-
-            let color = x + barWidth <= playedX ? playedColor : pendingColor
-            context.fill(path, with: .color(color.opacity(0.55)))
-            context.fill(innerPath, with: .color(color))
+        // Re-run when the track changes or when heavy work becomes allowed
+        // (battery saver switched off, or the phone was plugged in).
+        .task(id: WaveformTaskKey(trackID: trackID,
+                                  allowCompute: PowerState.mayRunHeavyWork(settings: settings))) {
+            await loadWaveform()
         }
     }
 
@@ -140,8 +123,51 @@ struct WaveformSeekBar: View {
                                                           url: url,
                                                           startTime: startTime,
                                                           endTime: endTime,
-                                                          buckets: 300)
+                                                          buckets: 300,
+                                                          allowCompute: PowerState.mayRunHeavyWork(settings: settings))
         await MainActor.run { withAnimation(.easeOut(duration: 0.35)) { self.waveform = data } }
+    }
+}
+
+private struct WaveformTaskKey: Equatable {
+    let trackID: UUID?
+    let allowCompute: Bool
+}
+
+// MARK: - Cached waveform layer
+
+/// Draws the whole envelope in one colour. Equatable, so SwiftUI skips
+/// redrawing it unless the waveform or colour actually changes.
+private struct WaveformLayer: View, Equatable {
+    let waveform: WaveformData
+    let color: Color
+
+    nonisolated static func == (lhs: WaveformLayer, rhs: WaveformLayer) -> Bool {
+        lhs.color == rhs.color && lhs.waveform == rhs.waveform
+    }
+
+    var body: some View {
+        Canvas { context, size in
+            let count = waveform.peaks.count
+            guard count > 0 else { return }
+            let spacing = size.width / Double(count)
+            let barWidth = max(1.0, spacing * 0.62)
+            let mid = size.height / 2
+            var outer = Path()
+            var inner = Path()
+            for i in 0..<count {
+                let x = Double(i) * spacing
+                let h = max(2.0, Double(waveform.peaks[i]) * (size.height - 4))
+                let innerH = max(1.5, Double(waveform.rms[i]) * (size.height - 4))
+                outer.addRoundedRect(in: CGRect(x: x, y: mid - h / 2, width: barWidth, height: h),
+                                     cornerSize: CGSize(width: barWidth / 2, height: barWidth / 2))
+                inner.addRoundedRect(in: CGRect(x: x, y: mid - innerH / 2, width: barWidth, height: innerH),
+                                     cornerSize: CGSize(width: barWidth / 2, height: barWidth / 2))
+            }
+            // Two fills total instead of two per bar.
+            context.fill(outer, with: .color(color.opacity(0.55)))
+            context.fill(inner, with: .color(color))
+        }
     }
 }
 
@@ -176,29 +202,31 @@ final class MeterState: ObservableObject {
     @Published var levels: [Float] = Array(repeating: 0, count: 24)
 }
 
+/// One Canvas pass per update instead of 24 separately animated views.
+/// Fed ~15 times a second, and only while this view is on screen.
 struct SpectrumView: View {
     @ObservedObject var meters: MeterState
-    var barCount: Int = 24
 
     @EnvironmentObject private var themes: ThemeManager
 
     var body: some View {
-        GeometryReader { geo in
-            let levels = meters.levels
-            let spacing = geo.size.width / Double(max(1, barCount)) * 0.3
-            let barWidth = (geo.size.width - spacing * Double(barCount - 1)) / Double(barCount)
-            HStack(alignment: .bottom, spacing: spacing) {
-                ForEach(0..<barCount, id: \.self) { i in
-                    let level = i < levels.count ? Double(levels[i]) : 0
-                    let shaped = pow(level, 0.6)
-                    RoundedRectangle(cornerRadius: barWidth / 2)
-                        .fill(themes.accent.opacity(0.35 + 0.65 * shaped))
-                        .frame(width: barWidth,
-                               height: max(2, geo.size.height * shaped))
-                        .animation(.easeOut(duration: 0.08), value: level)
-                }
+        let accent = themes.accent
+        let levels = meters.levels
+        Canvas { context, size in
+            let count = max(1, levels.count)
+            let slot = size.width / CGFloat(count)
+            let barWidth = slot * 0.7
+            for i in 0..<levels.count {
+                let level = Double(max(0, min(1, levels[i])))
+                let shaped = pow(level, 0.6)
+                let h = max(2, size.height * CGFloat(shaped))
+                let rect = CGRect(x: CGFloat(i) * slot + (slot - barWidth) / 2,
+                                  y: size.height - h,
+                                  width: barWidth,
+                                  height: h)
+                context.fill(Path(roundedRect: rect, cornerRadius: barWidth / 2),
+                             with: .color(accent.opacity(0.35 + 0.65 * shaped)))
             }
-            .frame(maxHeight: .infinity, alignment: .bottom)
         }
     }
 }

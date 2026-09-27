@@ -40,7 +40,7 @@ struct QueueView: View {
                             HStack {
                                 Text(player.queueSourceName.isEmpty ? "Up Next" : player.queueSourceName)
                                 Spacer()
-                                Text(totalRemaining)
+                                QueueTimeLeft(clock: player.clock)
                             }
                         }
                     }
@@ -87,12 +87,27 @@ struct QueueView: View {
             }
         }
     }
+}
+
+// MARK: - Time left
+
+/// The "time left" figure in the queue header. Observes the clock directly,
+/// because `player.position` is not published and would never refresh here.
+private struct QueueTimeLeft: View {
+    @ObservedObject var clock: PlaybackClock
+
+    @EnvironmentObject private var player: PlaybackController
+    @EnvironmentObject private var library: MediaLibrary
+
+    var body: some View {
+        Text(totalRemaining)
+    }
 
     private var totalRemaining: String {
         guard player.currentIndex >= 0 else { return "" }
         let remaining = player.queue.dropFirst(player.currentIndex)
             .compactMap { library.track(id: $0)?.duration }
             .reduce(0, +)
-        return (remaining - player.position).longFormat + " left"
+        return (remaining - clock.position).longFormat + " left"
     }
 }

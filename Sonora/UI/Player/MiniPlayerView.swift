@@ -13,8 +13,9 @@ struct MiniPlayerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SlimProgressBar(fraction: player.trackLength > 0
-                                      ? player.elapsed / player.trackLength : 0)
+            // Only this bar observes the playhead; the rest of the mini
+            // player redraws only when the track or play state changes.
+            MiniProgress(clock: player.clock)
 
             HStack(spacing: 12) {
                 ArtworkView(key: player.currentTrack?.artworkKey, size: 42, cornerRadius: 7)
@@ -65,5 +66,15 @@ struct MiniPlayerView: View {
                     else if value.translation.width > 60 { player.previous(allowRestart: false) }
                 }
         )
+    }
+}
+
+private struct MiniProgress: View {
+    @ObservedObject var clock: PlaybackClock
+    @EnvironmentObject private var player: PlaybackController
+
+    var body: some View {
+        let length = player.trackLength
+        SlimProgressBar(fraction: length > 0 ? player.elapsed(at: clock.position) / length : 0)
     }
 }

@@ -6,6 +6,8 @@
 //
 
 import SwiftUI
+import CoreImage
+import UIKit
 
 struct NowPlayingView: View {
 
@@ -58,11 +60,11 @@ struct NowPlayingView: View {
                 // Square art happened to look fine, which is why only *some*
                 // albums broke the layout.
                 GeometryReader { geo in
-                    Image(uiImage: art)
-                        .resizable()
-                        .scaledToFill()
+                    // Pre-blurred once per track on a background thread. A
+                    // live 80pt SwiftUI blur is re-rendered by the GPU every
+                    // time anything on this screen changes.
+                    ArtBackdrop(artKey: player.currentTrack?.artworkKey, art: art)
                         .frame(width: geo.size.width, height: geo.size.height)
-                        .blur(radius: 80, opaque: true)
                         .overlay(themes.theme.background.opacity(themes.theme.isDark ? 0.58 : 0.74))
                         .clipped()
                 }
@@ -166,7 +168,7 @@ struct NowPlayingView: View {
                              onPrevious: { player.previous(allowRestart: false) },
                              onNext: { player.next(userInitiated: true) })
 
-                if settings.showVisualizer && player.isPlaying {
+                if settings.visualizerAllowed && player.isPlaying {
                     SpectrumView(meters: player.meters)
                         .frame(height: side * 0.16)
                         .padding(.horizontal, side * 0.08)
@@ -174,6 +176,8 @@ struct NowPlayingView: View {
                         .padding(.bottom, side * 0.06)
                         .opacity(0.85)
                         .allowsHitTesting(false)
+                        .onAppear { player.setVisualizerVisible(true) }
+                        .onDisappear { player.setVisualizerVisible(false) }
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
@@ -225,47 +229,9 @@ struct NowPlayingView: View {
     }
 
     private var seekSection: some View {
-        VStack(spacing: 4) {
-            Group {
-                if settings.showWaveformSeekBar {
-                    WaveformSeekBar(trackID: track?.id,
-                                    url: track.flatMap { library.url(for: $0) },
-                                    // Analysis range and display range are the
-                                    // same thing: the track's own extent. Left
-                                    // nil for ordinary files so the analyser
-                                    // reads to the end of the file rather than
-                                    // to a duration that may not have arrived
-                                    // from the engine yet.
-                                    startTime: track?.cueStart ?? 0,
-                                    endTime: track?.cueEnd,
-                                    position: player.position,
-                                    duration: max(player.duration, 0.01),
-                                    onScrubBegan: { player.beginScrub() },
-                                    onScrubChanged: { player.scrubPreview($0) },
-                                    onScrubEnded: { player.endScrub(at: $0) })
-                        .frame(height: 52)
-                } else {
-                    // The plain slider works in track time too, so both bars
-                    // behave identically on cue-sheet tracks.
-                    Slider(value: Binding(
-                        get: { min(player.elapsed, max(player.trackLength, 0.01)) },
-                        set: { player.scrubPreview(player.trackStart + $0) }
-                    ), in: 0...max(player.trackLength, 0.01), onEditingChanged: { editing in
-                        if editing { player.beginScrub() } else { player.endScrub(at: player.position) }
-                    })
-                    .tint(themes.accent)
-                    .frame(height: 52)
-                }
-            }
-
-            HStack {
-                Text(player.elapsed.timecode)
-                Spacer()
-                Text("-" + max(0, player.trackLength - player.elapsed).timecode)
-            }
-            .font(.system(size: 11, design: .monospaced))
-            .foregroundStyle(themes.theme.textSecondary)
-        }
+        // Lives in its own view observing only the clock, so the playhead
+        // ticking does not re-render the rest of this screen.
+        SeekSection(clock: player.clock, track: track)
     }
 
     private var transportRow: some View {
@@ -549,5 +515,131 @@ struct TrackInfoView: View {
                 .textSelection(.enabled)
         }
         .font(.system(size: 14))
+    }
+}
+
+// MARK: - Seek section
+
+private struct SeekSection: View {
+    @ObservedObject var clock: PlaybackClock
+    let track: Track?
+
+    @EnvironmentObject private var player: PlaybackController
+    @EnvironmentObject private var library: MediaLibrary
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var themes: ThemeManager
+
+    var body: some View {
+        let elapsed = player.elapsed(at: clock.position)
+        let length = player.trackLength
+        VStack(spacing: 4) {
+            Group {
+                if settings.showWaveformSeekBar {
+                    WaveformSeekBar(trackID: track?.id,
+                                    url: track.flatMap { library.url(for: $0) },
+                                    // Analysis range and display range are the
+                                    // same thing: the track's own extent. Left
+                                    // nil for ordinary files so the analyser
+                                    // reads to the end of the file rather than
+                                    // to a duration that may not have arrived
+                                    // from the engine yet.
+                                    startTime: track?.cueStart ?? 0,
+                                    endTime: track?.cueEnd,
+                                    position: clock.position,
+                                    duration: max(clock.duration, 0.01),
+                                    onScrubBegan: { player.beginScrub() },
+                                    onScrubChanged: { player.scrubPreview($0) },
+                                    onScrubEnded: { player.endScrub(at: $0) })
+                        .frame(height: 52)
+                } else {
+                    // The plain slider works in track time too, so both bars
+                    // behave identically on cue-sheet tracks.
+                    Slider(value: Binding(
+                        get: { min(elapsed, max(length, 0.01)) },
+                        set: { player.scrubPreview(player.trackStart + $0) }
+                    ), in: 0...max(length, 0.01), onEditingChanged: { editing in
+                        if editing { player.beginScrub() } else { player.endScrub(at: player.position) }
+                    })
+                    .tint(themes.accent)
+                    .frame(height: 52)
+                }
+            }
+
+            HStack {
+                Text(elapsed.timecode)
+                Spacer()
+                Text("-" + max(0, length - elapsed).timecode)
+            }
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundStyle(themes.theme.textSecondary)
+        }
+    }
+}
+
+// MARK: - Blurred backdrop
+
+/// Shows a pre-blurred copy of the artwork, computed once per track.
+private struct ArtBackdrop: View {
+    let artKey: String?
+    let art: UIImage
+
+    @State private var blurred: UIImage?
+
+    var body: some View {
+        ZStack {
+            if let blurred {
+                Image(uiImage: blurred)
+                    .resizable()
+                    .interpolation(.medium)
+                    .scaledToFill()
+            }
+        }
+        .task(id: artKey) {
+            let source = art
+            let key = artKey
+            let img = await Task.detached(priority: .utility) {
+                Backdrop.blurred(from: source, cacheKey: key)
+            }.value
+            // A newer artKey cancelled this task while the blur ran; don't
+            // let the stale image overwrite the newer track's backdrop.
+            guard !Task.isCancelled else { return }
+            blurred = img
+        }
+    }
+}
+
+enum Backdrop {
+    private static let context = CIContext(options: [.cacheIntermediates: false])
+    private static let cache: NSCache<NSString, UIImage> = {
+        let c = NSCache<NSString, UIImage>()
+        c.countLimit = 8
+        return c
+    }()
+
+    /// Shrinks the art to 64px and blurs that. Blurring a thumbnail is
+    /// orders of magnitude cheaper than blurring full-size art, and the
+    /// result is stretched full-screen anyway, so it looks the same.
+    static func blurred(from image: UIImage, cacheKey: String?) -> UIImage? {
+        if let cacheKey, let hit = cache.object(forKey: cacheKey as NSString) { return hit }
+
+        let side: CGFloat = 64
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let small = UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: format).image { _ in
+            image.draw(in: CGRect(x: 0, y: 0, width: side, height: side))
+        }
+
+        var result: UIImage = small
+        if let input = CIImage(image: small) {
+            let output = input.clampedToExtent()
+                .applyingGaussianBlur(sigma: 5)
+                .cropped(to: input.extent)
+            if let cg = context.createCGImage(output, from: input.extent) {
+                result = UIImage(cgImage: cg)
+            }
+        }
+        if let cacheKey { cache.setObject(result, forKey: cacheKey as NSString) }
+        return result
     }
 }
