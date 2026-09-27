@@ -21,6 +21,7 @@ struct SettingsView: View {
         NavigationStack {
             List {
                 foldersSection
+                batterySection
                 playbackSection
                 appearanceSection
                 librarySection
@@ -96,6 +97,26 @@ struct SettingsView: View {
             LabeledSlider(title: "Previous restarts track after", value: $settings.rewindOnPrevSeconds,
                           range: 0...20, step: 1,
                           format: { $0 == 0 ? "Never" : String(format: "%.0f s", $0) })
+        }
+        .tint(themes.accent)
+    }
+
+    private var batterySection: some View {
+        Section {
+            Picker("Battery Saver", selection: $settings.powerMode) {
+                ForEach(PowerMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            if settings.batterySaverActive {
+                Label("Battery Saver is on", systemImage: "battery.100percent.bolt")
+                    .font(.system(size: 13))
+                    .foregroundStyle(themes.accent)
+            }
+        } header: {
+            Text("Battery")
+        } footer: {
+            Text("Battery Saver hides the spectrum visualizer, lets the screen sleep, caps playback at 48 kHz (hi-res above that only matters with a wired USB DAC), stops the \"now playing\" bars from animating, and only builds waveforms or measures loudness while charging. AirPods, Bluetooth and the built-in speaker run at 48 kHz or below anyway, so they sound the same.")
         }
         .tint(themes.accent)
     }
