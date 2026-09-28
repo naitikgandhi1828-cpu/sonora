@@ -149,7 +149,9 @@ extension View {
 
 extension TimeInterval {
     var timecode: String {
-        guard isFinite, self >= 0 else { return "0:00" }
+        // The upper bound matters too: `Int(1e300)` traps just like `Int(.nan)`,
+        // and `.greatestFiniteMagnitude` is used as "no end" elsewhere.
+        guard isFinite, self >= 0, self < 1e9 else { return "0:00" }
         let total = Int(self.rounded())
         let h = total / 3600, m = (total % 3600) / 60, s = total % 60
         return h > 0 ? String(format: "%d:%02d:%02d", h, m, s)
@@ -157,7 +159,7 @@ extension TimeInterval {
     }
 
     var longFormat: String {
-        guard isFinite, self >= 0 else { return "0m" }
+        guard isFinite, self >= 0, self < 1e12 else { return "0m" }
         let total = Int(self.rounded())
         let d = total / 86400, h = (total % 86400) / 3600, m = (total % 3600) / 60
         if d > 0 { return "\(d)d \(h)h" }
