@@ -59,6 +59,31 @@ enum ShuffleMode: Int, Codable, CaseIterable, Identifiable {
     var next: ShuffleMode { ShuffleMode(rawValue: (rawValue + 1) % 3) ?? .off }
 }
 
+/// Which reverb algorithm is in circuit.
+enum ReverbEngine: Int, Codable, CaseIterable, Identifiable {
+    /// Sonora's eight-line feedback delay network (HallReverbUnit).
+    case studio = 0
+    /// The Freeverb comb/allpass engine (FreeverbUnit).
+    case classic = 1
+    /// Apple's AUReverb2.
+    case apple = 2
+    var id: Int { rawValue }
+    var label: String {
+        switch self {
+        case .studio: return "Studio"
+        case .classic: return "Classic"
+        case .apple: return "Apple"
+        }
+    }
+    var blurb: String {
+        switch self {
+        case .studio: return "Dense, smooth tail with separate bass and treble decay. Best quality."
+        case .classic: return "Freeverb comb-filter reverb with Poweramp-style controls."
+        case .apple: return "iOS's built-in reverb rooms. Lightest on battery."
+        }
+    }
+}
+
 /// How aggressively Sonora trades features for battery life.
 enum PowerMode: Int, Codable, CaseIterable, Identifiable {
     case off = 0, lowPowerOnly = 1, always = 2
@@ -134,6 +159,10 @@ final class AppSettings: ObservableObject {
     @Published var eqPreampDB: Double { didSet { save(eqPreampDB, "eqPreamp") } }
     @Published var eqBands: [EQBand] { didSet { save(eqBands, "eqBands") } }
     @Published var selectedPresetName: String { didSet { save(selectedPresetName, "eqPresetName") } }
+    /// Remember a separate EQ for each output (AirPods, speaker, car…).
+    @Published var eqPerDevice: Bool { didSet { save(eqPerDevice, "eqPerDev") } }
+    /// Lower the EQ pre-amp automatically so boosted bands can't clip.
+    @Published var eqAutoPreamp: Bool { didSet { save(eqAutoPreamp, "eqAutoPre") } }
     @Published var userPresets: [EQPreset] { didSet { save(userPresets, "eqUserPresets") } }
 
     // MARK: Tone
@@ -161,7 +190,27 @@ final class AppSettings: ObservableObject {
     @Published var reverbMix: Double { didSet { save(reverbMix, "revMix2") } }
     @Published var reverbUseAdvanced: Bool { didSet { save(reverbUseAdvanced, "revAdv") } }
     /// true = Freeverb (Schroeder-Moorer), false = Apple AUReverb2.
+    /// Kept for older settings screens; `reverbEngine` is what the audio uses.
     @Published var reverbUseFreeverb: Bool { didSet { save(reverbUseFreeverb, "revFv") } }
+    @Published var reverbEngine: ReverbEngine { didSet { save(reverbEngine.rawValue, "revEngine") } }
+
+    // MARK: Studio reverb (HallReverbUnit)
+
+    @Published var studioPresetName: String { didSet { save(studioPresetName, "stPreset") } }
+    @Published var studioMix: Double { didSet { save(studioMix, "stMix") } }                 // 0...1
+    @Published var studioDecay: Double { didSet { save(studioDecay, "stDecay") } }           // s, 0.2...20
+    @Published var studioSize: Double { didSet { save(studioSize, "stSize") } }              // 0...1
+    @Published var studioPreDelayMS: Double { didSet { save(studioPreDelayMS, "stPre") } }   // ms, 0...250
+    @Published var studioBassDecay: Double { didSet { save(studioBassDecay, "stBass") } }    // ×, 0.5...2
+    @Published var studioTrebleDecay: Double { didSet { save(studioTrebleDecay, "stTreb") } }// ×, 0.1...1
+    @Published var studioLowCut: Double { didSet { save(studioLowCut, "stLowCut") } }        // Hz, 20...600
+    @Published var studioHighCut: Double { didSet { save(studioHighCut, "stHighCut") } }     // Hz, 1k...20k
+    @Published var studioDiffusion: Double { didSet { save(studioDiffusion, "stDiff") } }    // 0...1
+    @Published var studioModulation: Double { didSet { save(studioModulation, "stMod") } }   // 0...1
+    @Published var studioEarly: Double { didSet { save(studioEarly, "stEarly") } }           // 0...1
+    @Published var studioWidth: Double { didSet { save(studioWidth, "stWidth") } }           // 0...1
+    /// Holds the current tail indefinitely. Deliberately not persisted.
+    @Published var studioFreeze: Bool = false
 
     // MARK: Spatial
 
@@ -279,6 +328,8 @@ final class AppSettings: ObservableObject {
             eqBands = EQPreset.flatBands()
         }
         selectedPresetName = s("eqPresetName", "Flat")
+        eqPerDevice = b("eqPerDev", true)
+        eqAutoPreamp = b("eqAutoPre", true)
         if let data = d.data(forKey: "eqUserPresets"),
            let decoded = try? JSONDecoder().decode([EQPreset].self, from: data) {
             userPresets = decoded
@@ -304,6 +355,22 @@ final class AppSettings: ObservableObject {
         reverbMix = n("revMix2", defaultReverb.mix)
         reverbUseAdvanced = b("revAdv", true)
         reverbUseFreeverb = b("revFv", true)
+        reverbEngine = ReverbEngine(rawValue: i("revEngine", ReverbEngine.studio.rawValue)) ?? .studio
+
+        let studioDefault = StudioReverbPreset.chamber
+        studioPresetName = s("stPreset", studioDefault.name)
+        studioMix = n("stMix", studioDefault.mix)
+        studioDecay = n("stDecay", studioDefault.decay)
+        studioSize = n("stSize", studioDefault.size)
+        studioPreDelayMS = n("stPre", studioDefault.preDelayMS)
+        studioBassDecay = n("stBass", studioDefault.bassDecay)
+        studioTrebleDecay = n("stTreb", studioDefault.trebleDecay)
+        studioLowCut = n("stLowCut", studioDefault.lowCut)
+        studioHighCut = n("stHighCut", studioDefault.highCut)
+        studioDiffusion = n("stDiff", studioDefault.diffusion)
+        studioModulation = n("stMod", studioDefault.modulation)
+        studioEarly = n("stEarly", studioDefault.early)
+        studioWidth = n("stWidth", studioDefault.width)
 
         spatialEnabled = b("spOn", false)
         spatialAmount = n("spAmt", 60)
@@ -400,6 +467,8 @@ final class AppSettings: ObservableObject {
         stereoWidth = 1; balance = 0; monoDownmix = false
         reverbEnabled = false
         apply(reverbPreset: .scene)
+        apply(studioPreset: .chamber)
+        studioFreeze = false
         spatialEnabled = false
         applySpatialPreset(.headphones)
         playbackRate = 1; pitchCents = 0
@@ -468,6 +537,109 @@ final class AppSettings: ObservableObject {
         reverbSize = preset.size
         reverbMix = preset.mix
         reverbPresetName = preset.name
+    }
+
+    // MARK: - Studio reverb presets
+
+    /// Rooms for the Studio engine. Values are Sonora's own, tuned by ear
+    /// against what each space should feel like: decay in seconds (RT60),
+    /// bass/treble decay as multiples of it, filters in Hz.
+    struct StudioReverbPreset: Identifiable, Hashable {
+        let name: String
+        let symbol: String
+        let decay: Double
+        let size: Double
+        let preDelayMS: Double
+        let bassDecay: Double
+        let trebleDecay: Double
+        let lowCut: Double
+        let highCut: Double
+        let diffusion: Double
+        let modulation: Double
+        let early: Double
+        let width: Double
+        let mix: Double
+
+        var id: String { name }
+
+        static let booth = StudioReverbPreset(name: "Vocal Booth", symbol: "mic",
+            decay: 0.45, size: 0.15, preDelayMS: 0, bassDecay: 1.0, trebleDecay: 0.6,
+            lowCut: 120, highCut: 10_000, diffusion: 0.6, modulation: 0.1,
+            early: 0.6, width: 0.7, mix: 0.18)
+        static let drumRoom = StudioReverbPreset(name: "Drum Room", symbol: "music.note",
+            decay: 0.7, size: 0.25, preDelayMS: 3, bassDecay: 1.0, trebleDecay: 0.55,
+            lowCut: 90, highCut: 9_000, diffusion: 0.7, modulation: 0.15,
+            early: 0.7, width: 0.9, mix: 0.25)
+        static let smallRoom = StudioReverbPreset(name: "Small Room", symbol: "square",
+            decay: 0.9, size: 0.3, preDelayMS: 5, bassDecay: 1.1, trebleDecay: 0.5,
+            lowCut: 80, highCut: 8_000, diffusion: 0.75, modulation: 0.2,
+            early: 0.55, width: 0.85, mix: 0.25)
+        static let ambience = StudioReverbPreset(name: "Ambience", symbol: "sparkles",
+            decay: 1.2, size: 0.5, preDelayMS: 10, bassDecay: 1.0, trebleDecay: 0.6,
+            lowCut: 150, highCut: 11_000, diffusion: 0.85, modulation: 0.5,
+            early: 0.2, width: 1.0, mix: 0.2)
+        static let chamber = StudioReverbPreset(name: "Chamber", symbol: "building.columns",
+            decay: 1.6, size: 0.45, preDelayMS: 15, bassDecay: 1.2, trebleDecay: 0.55,
+            lowCut: 70, highCut: 9_000, diffusion: 0.8, modulation: 0.3,
+            early: 0.45, width: 1.0, mix: 0.3)
+        static let vocalPlate = StudioReverbPreset(name: "Vocal Plate", symbol: "waveform",
+            decay: 1.8, size: 0.35, preDelayMS: 12, bassDecay: 0.9, trebleDecay: 0.75,
+            lowCut: 180, highCut: 12_000, diffusion: 0.9, modulation: 0.3,
+            early: 0.15, width: 1.0, mix: 0.28)
+        static let brightPlate = StudioReverbPreset(name: "Bright Plate", symbol: "sun.max",
+            decay: 2.2, size: 0.4, preDelayMS: 8, bassDecay: 0.8, trebleDecay: 0.9,
+            lowCut: 250, highCut: 16_000, diffusion: 0.95, modulation: 0.45,
+            early: 0.1, width: 1.0, mix: 0.3)
+        static let concertHall = StudioReverbPreset(name: "Concert Hall", symbol: "music.mic",
+            decay: 2.6, size: 0.7, preDelayMS: 25, bassDecay: 1.35, trebleDecay: 0.45,
+            lowCut: 60, highCut: 8_000, diffusion: 0.85, modulation: 0.35,
+            early: 0.4, width: 1.0, mix: 0.32)
+        static let warmHall = StudioReverbPreset(name: "Warm Hall", symbol: "flame",
+            decay: 3.2, size: 0.75, preDelayMS: 30, bassDecay: 1.6, trebleDecay: 0.3,
+            lowCut: 50, highCut: 6_000, diffusion: 0.85, modulation: 0.4,
+            early: 0.35, width: 1.0, mix: 0.33)
+        static let arena = StudioReverbPreset(name: "Arena", symbol: "sportscourt",
+            decay: 4.5, size: 1.0, preDelayMS: 70, bassDecay: 1.3, trebleDecay: 0.4,
+            lowCut: 60, highCut: 7_500, diffusion: 0.8, modulation: 0.35,
+            early: 0.5, width: 1.0, mix: 0.35)
+        static let cathedral = StudioReverbPreset(name: "Cathedral", symbol: "building",
+            decay: 6.5, size: 0.95, preDelayMS: 45, bassDecay: 1.5, trebleDecay: 0.35,
+            lowCut: 40, highCut: 7_000, diffusion: 0.9, modulation: 0.5,
+            early: 0.3, width: 1.0, mix: 0.38)
+        static let darkSpace = StudioReverbPreset(name: "Dark Space", symbol: "moon.stars",
+            decay: 8.0, size: 0.9, preDelayMS: 60, bassDecay: 1.8, trebleDecay: 0.2,
+            lowCut: 40, highCut: 4_500, diffusion: 0.9, modulation: 0.6,
+            early: 0.2, width: 1.0, mix: 0.4)
+        static let infinite = StudioReverbPreset(name: "Infinite", symbol: "infinity",
+            decay: 12.0, size: 0.9, preDelayMS: 20, bassDecay: 1.2, trebleDecay: 0.6,
+            lowCut: 80, highCut: 10_000, diffusion: 1.0, modulation: 0.7,
+            early: 0.1, width: 1.0, mix: 0.4)
+
+        static let all: [StudioReverbPreset] = [booth, drumRoom, smallRoom, ambience,
+                                                chamber, vocalPlate, brightPlate,
+                                                concertHall, warmHall, arena,
+                                                cathedral, darkSpace, infinite]
+    }
+
+    func apply(studioPreset p: StudioReverbPreset) {
+        studioDecay = p.decay
+        studioSize = p.size
+        studioPreDelayMS = p.preDelayMS
+        studioBassDecay = p.bassDecay
+        studioTrebleDecay = p.trebleDecay
+        studioLowCut = p.lowCut
+        studioHighCut = p.highCut
+        studioDiffusion = p.diffusion
+        studioModulation = p.modulation
+        studioEarly = p.early
+        studioWidth = p.width
+        studioMix = p.mix
+        studioPresetName = p.name
+    }
+
+    /// Name shown for the active reverb, whichever engine is in use.
+    var activeReverbName: String {
+        reverbEngine == .studio ? studioPresetName : reverbPresetName
     }
 
     // MARK: - Spatial presets
