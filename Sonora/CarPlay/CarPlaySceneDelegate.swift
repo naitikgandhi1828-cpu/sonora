@@ -61,6 +61,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
                                   didDisconnectInterfaceController interfaceController: CPInterfaceController) {
         cancellables.removeAll()
         self.interfaceController = nil
+        pushStartedAt = nil
     }
 
     // MARK: - Setup
@@ -195,11 +196,11 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     }
 
     private func pushTrackList(title: String, tracks: [Track]) {
-        guard let interfaceController else { return }
+        guard canPush else { return }
         let sections = tracks.isEmpty ? [] : [trackSection(tracks, sourceName: title)]
         let template = CPListTemplate(title: title, sections: clampedSections(sections))
         template.emptyViewTitleVariants = ["No songs"]
-        interfaceController.pushTemplate(template, animated: true, completion: nil)
+        push(template)
     }
 
     /// A folder's own tracks, then each subfolder's, depth first.
@@ -246,9 +247,34 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         if interfaceController.topTemplate === nowPlaying { return }
         if interfaceController.templates.contains(where: { $0 === nowPlaying }) {
             interfaceController.pop(to: nowPlaying, animated: true, completion: nil)
-        } else {
-            interfaceController.pushTemplate(nowPlaying, animated: true, completion: nil)
+        } else if canPush {
+            push(nowPlaying)
         }
+    }
+
+    // MARK: - Safe navigation
+
+    /// CarPlay raises an Objective-C exception (an instant crash) when an
+    /// audio app's stack goes past five templates, or when a template that is
+    /// already on the stack is pushed again. A double tap on a row does the
+    /// latter: the second push starts before the first has landed in
+    /// `templates`, so the `contains` check above cannot see it.
+    private let maxTemplateDepth = 5
+    private var pushStartedAt: Date?
+
+    private var canPush: Bool {
+        guard let interfaceController else { return false }
+        // One push at a time: the push animation takes a fraction of a
+        // second, and until it lands the new template is not in `templates`.
+        if let started = pushStartedAt, Date().timeIntervalSince(started) < 1 { return false }
+        return interfaceController.templates.count < maxTemplateDepth
+    }
+
+    private func push(_ template: CPTemplate) {
+        guard let interfaceController, canPush,
+              !interfaceController.templates.contains(where: { $0 === template }) else { return }
+        pushStartedAt = Date()
+        interfaceController.pushTemplate(template, animated: true, completion: nil)
     }
 
     // MARK: - Now-playing indicator
