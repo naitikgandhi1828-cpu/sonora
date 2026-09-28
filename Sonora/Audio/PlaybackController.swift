@@ -10,6 +10,7 @@ import Foundation
 import Combine
 import SwiftUI
 import UIKit
+import MediaPlayer
 import QuartzCore
 
 @MainActor
@@ -225,6 +226,28 @@ final class PlaybackController: ObservableObject {
             self.setCurrent(trackID: id)
             self.refreshNowPlaying()
         }
+        // Shuffle / repeat from CarPlay's Now Playing screen.
+        center.onShuffle = { [weak self] on in
+            self?.settings.shuffleMode = on ? .tracks : .off
+        }
+        center.onRepeat = { [weak self] type in
+            guard let self else { return }
+            switch type {
+            case .one: self.settings.repeatMode = .one
+            case .all: self.settings.repeatMode = .all
+            default: self.settings.repeatMode = .off
+            }
+        }
+        center.setSkipButtons(settings.lockScreenSkipButtons)
+    }
+
+    /// The app's repeat mode as the lock screen / CarPlay understand it.
+    private var remoteRepeatType: MPRepeatType {
+        switch settings.repeatMode {
+        case .one: return .one
+        case .all: return .all
+        default: return .off
+        }
     }
 
     private func wireSleepTimer() {
@@ -313,6 +336,18 @@ final class PlaybackController: ObservableObject {
             .sink { [weak self] _ in self?.powerSettingsChanged() }
             .store(in: &cancellables)
 
+        // Keep CarPlay / lock-screen shuffle, repeat and button style in step.
+        Publishers.Merge(settings.$shuffleMode.map { _ in true },
+                         settings.$repeatMode.map { _ in true })
+            .dropFirst(2)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.refreshNowPlaying() }
+            .store(in: &cancellables)
+        settings.$lockScreenSkipButtons
+            .dropFirst()
+            .sink { NowPlayingCenter.shared.setSkipButtons($0) }
+            .store(in: &cancellables)
+
         settings.$playbackRate
             .dropFirst()
             .receive(on: RunLoop.main)
@@ -381,6 +416,24 @@ final class PlaybackController: ObservableObject {
         queue.move(fromOffsets: source, toOffset: destination)
         if let id = currentID, let idx = queue.firstIndex(of: id) { currentIndex = idx }
         engine.invalidateChain()
+    }
+
+    /// Drops queue entries whose tracks have left the library (for example
+    /// after a folder is removed). Stops playback if the current track went.
+    func pruneQueue() {
+        let exists: (UUID) -> Bool = { [library] in library.track(id: $0) != nil }
+        guard queue.contains(where: { !exists($0) }) else { return }
+        let currentID = currentTrack?.id
+        queue.removeAll { !exists($0) }
+        unshuffledQueue.removeAll { !exists($0) }
+        shuffleHistory.removeAll { !exists($0) }
+        if let currentID, exists(currentID), let idx = queue.firstIndex(of: currentID) {
+            currentIndex = idx
+            engine.invalidateChain()
+        } else {
+            stop()
+            if queue.isEmpty { queueSourceName = "" }
+        }
     }
 
     func clearQueue() {
@@ -735,6 +788,8 @@ final class PlaybackController: ObservableObject {
                                        rate: isPlaying ? settings.playbackRate : 0,
                                        queueIndex: currentIndex >= 0 ? currentIndex : nil,
                                        queueCount: queue.isEmpty ? nil : queue.count)
+        NowPlayingCenter.shared.updateModes(shuffle: settings.shuffleMode != .off,
+                                            repeatType: remoteRepeatType)
         saveState()
     }
 

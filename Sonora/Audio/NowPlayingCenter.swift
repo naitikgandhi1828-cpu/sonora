@@ -22,6 +22,9 @@ final class NowPlayingCenter {
     var onSkipForward: ((TimeInterval) -> Void)?
     var onSkipBackward: ((TimeInterval) -> Void)?
     var onChangeRating: ((Int) -> Void)?
+    /// Shuffle / repeat buttons (shown by CarPlay's Now Playing screen).
+    var onShuffle: ((Bool) -> Void)?
+    var onRepeat: ((MPRepeatType) -> Void)?
 
     private var configured = false
     private var lastArtworkKey: String?
@@ -68,12 +71,47 @@ final class NowPlayingCenter {
             return .success
         }
 
+        c.changeShuffleModeCommand.addTarget { [weak self] event in
+            guard let e = event as? MPChangeShuffleModeCommandEvent else { return .commandFailed }
+            self?.onShuffle?(e.shuffleType != .off)
+            return .success
+        }
+        c.changeRepeatModeCommand.addTarget { [weak self] event in
+            guard let e = event as? MPChangeRepeatModeCommandEvent else { return .commandFailed }
+            self?.onRepeat?(e.repeatType)
+            return .success
+        }
+        c.changeShuffleModeCommand.isEnabled = true
+        c.changeRepeatModeCommand.isEnabled = true
+
         // Commands we do not implement should be explicitly disabled so the
         // lock screen does not show dead buttons.
         c.seekForwardCommand.isEnabled = false
         c.seekBackwardCommand.isEnabled = false
-        c.changeShuffleModeCommand.isEnabled = false
-        c.changeRepeatModeCommand.isEnabled = false
+
+        // Track buttons by default. See setSkipButtons(_:).
+        setSkipButtons(false)
+    }
+
+    /// iOS shows either ±N-second skip buttons or previous/next-track buttons
+    /// on the lock screen, Control Center and CarPlay — and when both are
+    /// enabled it picks the skip buttons. With them on, there was no way to
+    /// change song without unlocking the phone. Track buttons are now the
+    /// default; the skip buttons are an opt-in setting.
+    func setSkipButtons(_ enabled: Bool) {
+        let c = MPRemoteCommandCenter.shared()
+        c.skipForwardCommand.isEnabled = enabled
+        c.skipBackwardCommand.isEnabled = enabled
+        c.nextTrackCommand.isEnabled = true
+        c.previousTrackCommand.isEnabled = true
+    }
+
+    /// Keeps the shuffle / repeat buttons on CarPlay and the lock screen in
+    /// step with the app.
+    func updateModes(shuffle: Bool, repeatType: MPRepeatType) {
+        let c = MPRemoteCommandCenter.shared()
+        c.changeShuffleModeCommand.currentShuffleType = shuffle ? .items : .off
+        c.changeRepeatModeCommand.currentRepeatType = repeatType
     }
 
     func update(track: Track?,
