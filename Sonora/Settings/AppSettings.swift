@@ -209,6 +209,8 @@ final class AppSettings: ObservableObject {
     @Published var studioModulation: Double { didSet { save(studioModulation, "stMod") } }   // 0...1
     @Published var studioEarly: Double { didSet { save(studioEarly, "stEarly") } }           // 0...1
     @Published var studioWidth: Double { didSet { save(studioWidth, "stWidth") } }           // 0...1
+    /// Ducks the reverb under vocals (Studio and Classic engines). 0...1.
+    @Published var reverbClarity: Double { didSet { save(reverbClarity, "revClarity") } }
     /// Holds the current tail indefinitely. Deliberately not persisted.
     @Published var studioFreeze: Bool = false
 
@@ -290,7 +292,13 @@ final class AppSettings: ObservableObject {
     private init() {
         let d = UserDefaults.standard
         func b(_ k: String, _ def: Bool) -> Bool { d.object(forKey: k) == nil ? def : d.bool(forKey: k) }
-        func n(_ k: String, _ def: Double) -> Double { d.object(forKey: k) == nil ? def : d.double(forKey: k) }
+        // A corrupted or hand-edited value (NaN, ±inf) must never reach the
+        // audio engine or a Slider, both of which can trap on it.
+        func n(_ k: String, _ def: Double) -> Double {
+            guard d.object(forKey: k) != nil else { return def }
+            let v = d.double(forKey: k)
+            return v.isFinite ? v : def
+        }
         func i(_ k: String, _ def: Int) -> Int { d.object(forKey: k) == nil ? def : d.integer(forKey: k) }
         func s(_ k: String, _ def: String) -> String { d.string(forKey: k) ?? def }
 
@@ -371,6 +379,7 @@ final class AppSettings: ObservableObject {
         studioModulation = n("stMod", studioDefault.modulation)
         studioEarly = n("stEarly", studioDefault.early)
         studioWidth = n("stWidth", studioDefault.width)
+        reverbClarity = min(1, max(0, n("revClarity", 0.6)))
 
         spatialEnabled = b("spOn", false)
         spatialAmount = n("spAmt", 60)
@@ -434,7 +443,13 @@ final class AppSettings: ObservableObject {
     var allPresets: [EQPreset] { EQPreset.builtIns + userPresets }
 
     func apply(preset: EQPreset) {
-        eqBands = preset.bands
+        // Presets saved by older versions may carry a different band count;
+        // pad or trim to the ten bands the engine and UI expect.
+        var bands = preset.bands
+        let flat = EQPreset.flatBands()
+        if bands.count < flat.count { bands.append(contentsOf: flat[bands.count...]) }
+        if bands.count > flat.count { bands = Array(bands.prefix(flat.count)) }
+        eqBands = bands
         eqPreampDB = Double(preset.preampDB)
         selectedPresetName = preset.name
         eqEnabled = true
