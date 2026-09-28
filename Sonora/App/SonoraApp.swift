@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UIKit
 import AVFoundation
 
 @main
@@ -23,6 +24,9 @@ struct SonoraApp: App {
         // The audio session has to exist before the engine is built.
         AudioSessionManager.shared.activate()
         PowerState.startMonitoring()
+        // Tell iOS up front that Sonora takes remote-control events (lock
+        // screen, headphones, car head units, CarPlay's Now Playing).
+        UIApplication.shared.beginReceivingRemoteControlEvents()
 
         let settings = AppSettings.shared
         let library = MediaLibrary(settings: settings)
