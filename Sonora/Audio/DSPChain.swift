@@ -194,6 +194,7 @@ final class DSPChain {
         onChange(s.$studioEarly) { [weak self] in self?.applyReverb() }
         onChange(s.$studioWidth) { [weak self] in self?.applyReverb() }
         onChange(s.$studioFreeze) { [weak self] in self?.applyReverb() }
+        onChange(s.$reverbClarity) { [weak self] in self?.applyReverb() }
 
         // Spatial
         onChange(s.$spatialEnabled) { [weak self] in self?.applySpatial() }
@@ -342,6 +343,7 @@ final class DSPChain {
         setHall(.early, Float(max(0, min(1, s.studioEarly))))
         setHall(.width, Float(max(0, min(1, s.studioWidth))))
         setHall(.freeze, s.studioFreeze ? 1 : 0)
+        setHall(.clarity, Float(max(0, min(1, s.reverbClarity))))
     }
 
     private func setFreeverb(_ addr: FreeverbParam, _ value: Float) {
@@ -361,6 +363,7 @@ final class DSPChain {
         set(.preDelay, unit(settings.reverbPreDelay))
         set(.preDelayMix, unit(settings.reverbPreDelayMix))
         set(.width, 1)
+        set(.clarity, unit(settings.reverbClarity))
     }
 
     private func applySpatial() {

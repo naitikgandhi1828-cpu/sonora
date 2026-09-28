@@ -38,6 +38,19 @@ private struct Segment {
     var endFrame: AVAudioFramePosition { startFrame + frameCount }
 }
 
+/// Seconds to frames without trapping.
+///
+/// `AVAudioFramePosition(x)` is a hard crash when `x` is NaN, infinite or
+/// outside Int64, and all three can come out of a bad tag, a malformed cue
+/// sheet or a zero sample rate. Negative results clamp to 0 and the ceiling
+/// (about 290 days at 44.1 kHz) is far beyond any real file.
+func sonoraFramePosition(seconds: Double, sampleRate: Double) -> AVAudioFramePosition {
+    let value = seconds * sampleRate
+    let ceiling: Double = 1_099_511_627_776   // 2^40
+    if value.isNaN { return 0 }
+    return AVAudioFramePosition(min(max(value, 0), ceiling))
+}
+
 final class PlaybackEngine {
 
     // MARK: Nodes
@@ -210,7 +223,27 @@ final class PlaybackEngine {
         }
         engine.connect(previous, to: engine.mainMixerNode, format: fmt)
 
-        engine.prepare()
+        // Preparing against a route with no hardware format (mid route change,
+        // during a call) can raise an Objective-C exception. `start()` prepares
+        // on its own later, so skipping it here costs nothing.
+        if outputRouteIsUsable { engine.prepare() }
+    }
+
+    /// False while the hardware reports no usable output format. Starting or
+    /// preparing the engine then raises an exception Swift cannot catch.
+    private var outputRouteIsUsable: Bool {
+        let hw = engine.outputNode.outputFormat(forBus: 0)
+        return hw.sampleRate > 0 && hw.channelCount > 0
+    }
+
+    /// Formats a player node can safely be connected with. Connecting a 0 Hz /
+    /// 0 channel format, or a multichannel one with no channel layout, raises
+    /// an Objective-C exception inside `AVAudioEngine.connect`.
+    private static func isConnectable(_ format: AVAudioFormat) -> Bool {
+        guard format.sampleRate > 0, format.sampleRate.isFinite,
+              format.channelCount > 0 else { return false }
+        if format.channelCount > 2 && format.channelLayout == nil { return false }
+        return true
     }
 
     private func connectPlayer(_ node: AVAudioPlayerNode,
@@ -283,6 +316,10 @@ final class PlaybackEngine {
         idleWorkItem?.cancel()
         idleWorkItem = nil
         guard !engine.isRunning else { return }
+        guard outputRouteIsUsable else {
+            onError?("No audio output is available right now.")
+            return
+        }
         do {
             engine.prepare()
             try engine.start()
@@ -381,7 +418,18 @@ final class PlaybackEngine {
         currentItem = item
         applyGain(item.gainDB, to: gainA, ramp: false)
 
-        guard scheduleOnActivePlayer(item: item, file: file) else { return }
+        guard scheduleOnActivePlayer(item: item, file: file) else {
+            // Nothing left to schedule (start at or past the end, or a cue
+            // range that ends before it begins). Both players are stopped, so
+            // stop claiming to play instead of running the ticker over silence.
+            let wasPlaying = isPlaying
+            isPlaying = false
+            scheduleEngineIdle()
+            updateTicker()
+            onError?("Nothing to play in \(item.url.lastPathComponent)")
+            if wasPlaying { onPlayStateChanged?(false) }
+            return
+        }
 
         if autoplay {
             play()
@@ -402,7 +450,14 @@ final class PlaybackEngine {
         let scoped = item.url.startAccessingSecurityScopedResource()
         defer { if scoped { /* keep access for the life of the file object */ } }
         do {
-            return try AVAudioFile(forReading: item.url)
+            let file = try AVAudioFile(forReading: item.url)
+            // A file whose format cannot be connected would crash the engine
+            // in `connect`; treat it like any other unreadable file.
+            guard Self.isConnectable(file.processingFormat), file.length > 0 else {
+                print("[Engine] unsupported format: \(file.processingFormat)")
+                return nil
+            }
+            return file
         } catch {
             print("[Engine] open failed: \(error)")
             return nil
@@ -412,13 +467,16 @@ final class PlaybackEngine {
     @discardableResult
     private func scheduleOnActivePlayer(item: PlayableItem, file: AVAudioFile) -> Bool {
         let sr = file.processingFormat.sampleRate
-        let startFrame = AVAudioFramePosition(max(0, item.startTime) * sr)
+        guard sr > 0 else { return false }
+        let startFrame = sonoraFramePosition(seconds: item.startTime, sampleRate: sr)
         let endFrame: AVAudioFramePosition = {
-            if let end = item.endTime { return min(file.length, AVAudioFramePosition(end * sr)) }
+            if let end = item.endTime { return min(file.length, sonoraFramePosition(seconds: end, sampleRate: sr)) }
             return file.length
         }()
-        let frames = endFrame - startFrame
-        guard frames > 0 else { return false }
+        // startFrame >= length gives frames <= 0; a frame count over UInt32
+        // would trap in the AVAudioFrameCount conversion below.
+        let frames = min(endFrame - startFrame, AVAudioFramePosition(AVAudioFrameCount.max))
+        guard startFrame < file.length, frames > 0 else { return false }
 
         let segment = Segment(trackID: item.trackID,
                               startFrame: nextScheduleFrame,
@@ -495,6 +553,16 @@ final class PlaybackEngine {
         // screen resume), so reclaim it before starting the engine.
         session.activate()
         ensureEngineRunning()
+        // `AVAudioPlayerNode.play()` raises an Objective-C exception - an
+        // instant crash Swift cannot catch - when the engine is not running.
+        // That is exactly the state after `start()` fails because another app,
+        // a phone call or Siri holds the session. Report paused instead.
+        guard engine.isRunning else {
+            isPlaying = false
+            updateTicker()
+            if wasPlaying { onPlayStateChanged?(false) }
+            return
+        }
         if !player.isPlaying { player.play() }
         // Re-anchor extrapolation: frozenTime was captured at pause, and the
         // time spent paused must not count as elapsed playback.
@@ -573,18 +641,23 @@ final class PlaybackEngine {
     // MARK: - Crossfade
 
     private func beginCrossfade(to item: PlayableItem) {
+        // The incoming node is started below, and play() on a node whose
+        // engine is not running raises an uncatchable exception.
+        ensureEngineRunning()
+        guard engine.isRunning else { return }
         guard let file = openFile(for: item) else { return }
+
+        let sr = file.processingFormat.sampleRate
+        guard sr > 0 else { return }
+        let startFrame = sonoraFramePosition(seconds: item.startTime, sampleRate: sr)
+        let endFrame = item.endTime.map { min(file.length, sonoraFramePosition(seconds: $0, sampleRate: sr)) } ?? file.length
+        let frames = min(endFrame - startFrame, AVAudioFramePosition(AVAudioFrameCount.max))
+        guard startFrame < file.length, frames > 0 else { return }
 
         let target = idlePlayer
         let targetMixer = idleGain
         target.stop()
         connectPlayer(target, to: targetMixer, format: file.processingFormat)
-
-        let sr = file.processingFormat.sampleRate
-        let startFrame = AVAudioFramePosition(max(0, item.startTime) * sr)
-        let endFrame = item.endTime.map { min(file.length, AVAudioFramePosition($0 * sr)) } ?? file.length
-        let frames = endFrame - startFrame
-        guard frames > 0 else { return }
 
         openFiles[item.trackID] = file
         targetMixer.volume = 0
@@ -600,7 +673,14 @@ final class PlaybackEngine {
                 self.onFinished?()
             }
         }
-        ensureEngineRunning()
+        guard engine.isRunning else {
+            // Lost the engine between the check above and here (a
+            // configuration change). Drop the schedule rather than crash.
+            liveScheduleIDs.remove(scheduleID)
+            crossfadeScheduleID = nil
+            target.stop()
+            return
+        }
         target.play()
 
         pendingCrossfadeItem = item
@@ -628,12 +708,17 @@ final class PlaybackEngine {
             usingA.toggle()
             currentItem = incoming
             currentFormat = openFiles[incoming.trackID]?.processingFormat
-            segments = [Segment(trackID: incoming.trackID,
-                                startFrame: 0,
-                                frameCount: AVAudioFramePosition((incoming.duration) * (currentFormat?.sampleRate ?? 48_000)),
-                                fileStartFrame: AVAudioFramePosition(incoming.startTime * (currentFormat?.sampleRate ?? 48_000)),
-                                sampleRate: currentFormat?.sampleRate ?? 48_000)]
-            nextScheduleFrame = segments[0].frameCount
+            // Frame maths through the non-trapping helper: `duration` comes
+            // from tags and may be 0 or garbage.
+            let incomingRate = currentFormat?.sampleRate ?? 0
+            let rate = incomingRate > 0 ? incomingRate : 48_000
+            let incomingSegment = Segment(trackID: incoming.trackID,
+                                          startFrame: 0,
+                                          frameCount: sonoraFramePosition(seconds: incoming.duration, sampleRate: rate),
+                                          fileStartFrame: sonoraFramePosition(seconds: incoming.startTime, sampleRate: rate),
+                                          sampleRate: rate)
+            segments = [incomingSegment]
+            nextScheduleFrame = incomingSegment.frameCount
             pendingCrossfadeItem = nil
             crossfadeRamp = nil
             onAdvanced?(incoming.trackID)
@@ -691,6 +776,7 @@ final class PlaybackEngine {
             }
             return frozenTime ?? currentItem?.startTime ?? 0
         }
+        guard seg.sampleRate > 0 else { return frozenTime ?? currentItem?.startTime ?? 0 }
         let within = Double(frame - seg.startFrame) / seg.sampleRate
         let time = max(0, within) + Double(seg.fileStartFrame) / seg.sampleRate
         // Remember the last good reading for when the engine stops reporting
@@ -701,14 +787,15 @@ final class PlaybackEngine {
     }
 
     var currentDuration: TimeInterval {
-        guard let seg = currentSegment() else { return currentItem?.duration ?? 0 }
+        guard let seg = currentSegment(), seg.sampleRate > 0 else { return currentItem?.duration ?? 0 }
         let full = Double(seg.frameCount) / seg.sampleRate
         return full + Double(seg.fileStartFrame) / seg.sampleRate
     }
 
     /// Seconds left before the current segment ends.
     var remainingTime: TimeInterval {
-        guard let seg = currentSegment(), let frame = nodeSampleTime() else { return .greatestFiniteMagnitude }
+        guard let seg = currentSegment(), seg.sampleRate > 0,
+              let frame = nodeSampleTime() else { return .greatestFiniteMagnitude }
         return Double(seg.endFrame - frame) / seg.sampleRate
     }
 
@@ -808,8 +895,11 @@ final class PlaybackEngine {
         engine.mainMixerNode.removeTap(onBus: 0)
         isMeterTapInstalled = false
         guard let handler else { return }
+        // installTap raises an Objective-C exception for a 0 Hz / 0 channel
+        // bus format (no output route). Skip the visualizer rather than crash.
+        let busFormat = engine.mainMixerNode.outputFormat(forBus: 0)
+        guard busFormat.sampleRate > 0, busFormat.channelCount > 0 else { return }
         isMeterTapInstalled = true
-        let format = engine.mainMixerNode.outputFormat(forBus: 0)
 
         // Allocated once, up here, instead of on every buffer inside the tap.
         // The old version built a fresh 24-element array and hopped to the
@@ -819,7 +909,10 @@ final class PlaybackEngine {
         var levels = [Float](repeating: 0, count: bins)
         var lastPublish: CFTimeInterval = 0
 
-        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 2048, format: format) { buffer, _ in
+        // `nil` taps the bus in whatever format it has when audio flows. An
+        // explicit format captured here goes stale after a graph rebuild at a
+        // new sample rate, and a mismatched tap format is another exception.
+        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 2048, format: nil) { buffer, _ in
             guard let data = buffer.floatChannelData else { return }
             let frames = Int(buffer.frameLength)
             guard frames > 0 else { return }

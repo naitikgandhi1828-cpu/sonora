@@ -338,6 +338,9 @@ public final class SonoraDSPUnit: AUAudioUnit {
 
             let outList = UnsafeMutableAudioBufferListPointer(outputData)
             let outCount = outList.count
+            // `outList[0]` below is a trapping subscript on an empty list.
+            // Plain integer compare: nothing here allocates or locks.
+            guard outCount > 0 else { return kAudioUnitErr_NoConnection }
 
             // Adopt in-place operation when the host gave us null buffers.
             for i in 0..<outCount {

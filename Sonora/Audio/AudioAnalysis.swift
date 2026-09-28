@@ -43,8 +43,11 @@ actor WaveformAnalyzer {
         if let hit = cache[trackID] { return hit }
 
         let file = cacheDirectory.appendingPathComponent("\(trackID.uuidString).json")
+        // A cached file whose arrays disagree in length (older build, torn
+        // write) would index out of range in the seek bar; recompute instead.
         if let data = try? Data(contentsOf: file),
-           let decoded = try? JSONDecoder().decode(WaveformData.self, from: data) {
+           let decoded = try? JSONDecoder().decode(WaveformData.self, from: data),
+           !decoded.peaks.isEmpty, decoded.peaks.count == decoded.rms.count {
             cache[trackID] = decoded
             return decoded
         }
@@ -82,13 +85,15 @@ actor WaveformAnalyzer {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
 
-        guard let file = try? AVAudioFile(forReading: url) else { return nil }
+        guard buckets > 0, let file = try? AVAudioFile(forReading: url) else { return nil }
         let format = file.processingFormat
         let sr = format.sampleRate
-        let startFrame = AVAudioFramePosition(max(0, startTime) * sr)
-        let endFrame = endTime.map { min(file.length, AVAudioFramePosition($0 * sr)) } ?? file.length
+        guard sr > 0, format.channelCount > 0 else { return nil }
+        // Non-trapping conversion: cue times can be garbage.
+        let startFrame = sonoraFramePosition(seconds: startTime, sampleRate: sr)
+        let endFrame = endTime.map { min(file.length, sonoraFramePosition(seconds: $0, sampleRate: sr)) } ?? file.length
         let totalFrames = max(0, endFrame - startFrame)
-        guard totalFrames > 0 else { return nil }
+        guard totalFrames > 0, startFrame < file.length else { return nil }
 
         file.framePosition = startFrame
 
@@ -205,10 +210,11 @@ enum LoudnessAnalyzer {
         guard let file = try? AVAudioFile(forReading: url) else { return nil }
         let format = file.processingFormat
         let sr = format.sampleRate
-        let startFrame = AVAudioFramePosition(max(0, startTime) * sr)
-        let endFrame = endTime.map { min(file.length, AVAudioFramePosition($0 * sr)) } ?? file.length
+        guard sr > 0, format.channelCount > 0 else { return nil }
+        let startFrame = sonoraFramePosition(seconds: startTime, sampleRate: sr)
+        let endFrame = endTime.map { min(file.length, sonoraFramePosition(seconds: $0, sampleRate: sr)) } ?? file.length
         let total = max(0, endFrame - startFrame)
-        guard total > 0 else { return nil }
+        guard total > 0, startFrame < file.length else { return nil }
         file.framePosition = startFrame
 
         let chunk: AVAudioFrameCount = 65_536

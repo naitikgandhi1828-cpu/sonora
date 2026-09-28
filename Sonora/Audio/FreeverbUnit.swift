@@ -41,6 +41,7 @@ enum FreeverbParam: AUParameterAddress {
     case preDelay    = 5    // 0...1 -> 0...200 ms
     case preDelayMix = 6    // 0...1, how much of the reverb input is delayed
     case width       = 7    // 0...1, stereo spread
+    case clarity     = 8    // 0...1, ducks the reverb while vocals are present
 }
 
 /// One damped comb filter. Plain-old-data so it can live in malloc'd memory.
@@ -90,6 +91,19 @@ private struct FVState {
     var preDelay: Float = 0.1
     var preDelayMix: Float = 0.5
     var width: Float = 1
+    var clarity: Float = 0.6
+
+    // Vocal-clarity sidechain (see HallReverbUnit for the reasoning).
+    var scHPCoef: Float = 0
+    var scLPCoef: Float = 1
+    var scHP: Float = 0
+    var scLP: Float = 0
+    var scEnv: Float = 0
+    var scAttack: Float = 0.01
+    var scRelease: Float = 0.0001
+    var duckDepth: Float = 0
+    /// Output trim so dry + wet don't push the limiter into distortion.
+    var headroom: Float = 1
 
     var sampleRate: Float = 48_000
 
@@ -324,7 +338,8 @@ public final class FreeverbUnit: AUAudioUnit {
             p(.filter,      "filter",      "Filter",        0, 1, 0.8,  .generic),
             p(.preDelay,    "predelay",    "Pre-Delay",     0, 1, 0.1,  .generic),
             p(.preDelayMix, "predelaymix", "Pre-Delay Mix", 0, 1, 0.5,  .generic),
-            p(.width,       "width",       "Width",         0, 1, 1,    .generic)
+            p(.width,       "width",       "Width",         0, 1, 1,    .generic),
+            p(.clarity,     "clarity",     "Vocal Clarity", 0, 1, 0.6,  .generic)
         ]
 
         let tree = AUParameterTree.createTree(withChildren: params)
@@ -347,7 +362,7 @@ public final class FreeverbUnit: AUAudioUnit {
     private static func apply(_ addr: AUParameterAddress,
                               _ value: AUValue,
                               to st: UnsafeMutablePointer<FVState>) {
-        let v = max(0, min(1, value))
+        let v = value.isFinite ? max(0, min(1, value)) : 0
         switch FreeverbParam(rawValue: addr) {
         case .mix:         st.pointee.mix = v
         case .size:        st.pointee.size = v
@@ -357,6 +372,7 @@ public final class FreeverbUnit: AUAudioUnit {
         case .preDelay:    st.pointee.preDelay = v
         case .preDelayMix: st.pointee.preDelayMix = v
         case .width:       st.pointee.width = v
+        case .clarity:     st.pointee.clarity = v
         case .none:        return
         }
         recompute(st)
@@ -373,6 +389,7 @@ public final class FreeverbUnit: AUAudioUnit {
         case .preDelay:    return st.pointee.preDelay
         case .preDelayMix: return st.pointee.preDelayMix
         case .width:       return st.pointee.width
+        case .clarity:     return st.pointee.clarity
         case .none:        return 0
         }
     }
@@ -395,9 +412,18 @@ public final class FreeverbUnit: AUAudioUnit {
         let coef = 1 - expf(-2 * .pi * min(hz, sr * 0.45) / sr)
         st.pointee.filterCoef = min(1, max(0.0005, coef))
 
-        // Equal-power blend so the lower half of the mix control is audible.
+        // Wet follows an equal-power curve so the lower half of the mix
+        // control is audible, but the dry signal stays at full level up to
+        // 50% — turning the reverb up should add space, not take detail away.
         let wetG = sqrt(s.mix) * scaleWet
-        let dryG = sqrt(1 - s.mix)
+        let dryG = min(1, sqrt(max(0, 2 * (1 - s.mix))))
+        st.pointee.headroom = 1 / (1 + 0.35 * sqrt(s.mix))
+
+        st.pointee.scHPCoef = 1 - expf(-2 * .pi * 250 / sr)
+        st.pointee.scLPCoef = 1 - expf(-2 * .pi * min(4_000, sr * 0.45) / sr)
+        st.pointee.scAttack = 1 - expf(-1 / (0.008 * sr))
+        st.pointee.scRelease = 1 - expf(-1 / (0.32 * sr))
+        st.pointee.duckDepth = s.clarity * 9
         let w = s.width
         st.pointee.wet1 = wetG * (w / 2 + 0.5)
         st.pointee.wet2 = wetG * ((1 - w) / 2)
@@ -547,6 +573,7 @@ public final class FreeverbUnit: AUAudioUnit {
 
             let outList = UnsafeMutableAudioBufferListPointer(outputData)
             let outCount = outList.count
+            if outCount == 0 { return kAudioUnitErr_NoConnection }
             for i in 0..<outCount where outList[i].mData == nil {
                 outList[i].mData = inList[min(i, 1)].mData
                 outList[i].mDataByteSize = bytes
@@ -594,6 +621,12 @@ public final class FreeverbUnit: AUAudioUnit {
             let preR = s.preR
             let preSize = s.preSize
             var preIndex = s.preIndex
+
+            let headroom = s.headroom
+            let scHPCoef = s.scHPCoef, scLPCoef = s.scLPCoef
+            let scAttack = s.scAttack, scRelease = s.scRelease
+            let duckDepth = s.duckDepth
+            var scHP = s.scHP, scLP = s.scLP, scEnv = s.scEnv
 
             var i = 0
             while i < frames {
@@ -681,8 +714,16 @@ public final class FreeverbUnit: AUAudioUnit {
                 accL = filtL
                 accR = filtR
 
-                let mixedL = accL * wet1 + accR * wet2 + dryL * dry
-                let mixedR = accR * wet1 + accL * wet2 + dryR * dry
+                // Vocal-clarity sidechain on the dry mid signal.
+                let midIn = (dryL + dryR) * 0.5
+                scHP += (midIn - scHP) * scHPCoef
+                scLP += ((midIn - scHP) - scLP) * scLPCoef
+                let level = scLP < 0 ? -scLP : scLP
+                scEnv += (level - scEnv) * (level > scEnv ? scAttack : scRelease)
+                let duck = 1 / (1 + duckDepth * scEnv)
+
+                let mixedL = ((accL * wet1 + accR * wet2) * duck + dryL * dry) * headroom
+                let mixedR = ((accR * wet1 + accL * wet2) * duck + dryR * dry) * headroom
 
                 outL[i] = mixedL
                 if outR != outL { outR[i] = mixedR }
@@ -692,6 +733,9 @@ public final class FreeverbUnit: AUAudioUnit {
             st.pointee.preIndex = preIndex
             st.pointee.filtL = filtL
             st.pointee.filtR = filtR
+            st.pointee.scHP = scHP.isFinite ? scHP : 0
+            st.pointee.scLP = scLP.isFinite ? scLP : 0
+            st.pointee.scEnv = scEnv.isFinite ? scEnv : 0
             return noErr
         }
     }

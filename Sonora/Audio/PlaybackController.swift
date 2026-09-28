@@ -394,7 +394,12 @@ final class PlaybackController: ObservableObject {
         engine.invalidateChain()
     }
 
-    func removeFromQueue(at offsets: IndexSet) {
+    func removeFromQueue(at rawOffsets: IndexSet) {
+        // Offsets come from a List that may have been rendered against an
+        // older queue; `remove(atOffsets:)` and the subscript below trap on
+        // anything out of range.
+        let offsets = IndexSet(rawOffsets.filter { queue.indices.contains($0) })
+        guard !offsets.isEmpty else { return }
         let removingCurrent = offsets.contains(currentIndex)
         let idsBefore = queue
         queue.remove(atOffsets: offsets)
@@ -411,7 +416,12 @@ final class PlaybackController: ObservableObject {
         }
     }
 
-    func moveInQueue(from source: IndexSet, to destination: Int) {
+    func moveInQueue(from rawSource: IndexSet, to rawDestination: Int) {
+        // Same stale-offset hazard as removal: `move(fromOffsets:toOffset:)`
+        // traps on an out-of-range index.
+        let source = IndexSet(rawSource.filter { queue.indices.contains($0) })
+        guard !source.isEmpty else { return }
+        let destination = max(0, min(rawDestination, queue.count))
         let currentID = currentTrack?.id
         queue.move(fromOffsets: source, toOffset: destination)
         if let id = currentID, let idx = queue.firstIndex(of: id) { currentIndex = idx }
@@ -458,7 +468,9 @@ final class PlaybackController: ObservableObject {
             return
         }
         engine.play()
-        isPlaying = true
+        // The engine refuses to play (rather than crash) when the audio
+        // session cannot be activated, so mirror what it actually did.
+        isPlaying = engine.isPlaying
         position = engine.currentTime
         refreshNowPlaying()
     }
@@ -502,11 +514,23 @@ final class PlaybackController: ObservableObject {
             seek(to: currentTrack?.cueStart ?? 0)
             return
         }
-        if settings.shuffleMode != .off, let last = shuffleHistory.popLast(),
-           let idx = queue.firstIndex(of: last) {
-            currentIndex = idx
-            startCurrent(autoplay: true)
-            return
+        if settings.shuffleMode != .off {
+            // The history always ends with the song that is playing now
+            // (startCurrent appends it), so popping once just restarted the
+            // current song and Previous never went back. Drop the current
+            // song first, then step to the one before it.
+            let currentID = currentTrack?.id
+            while let last = shuffleHistory.last, last == currentID {
+                shuffleHistory.removeLast()
+            }
+            while let previousID = shuffleHistory.popLast() {
+                if let idx = queue.firstIndex(of: previousID) {
+                    currentIndex = idx
+                    startCurrent(autoplay: true)
+                    return
+                }
+            }
+            // No history left: fall through to plain queue order.
         }
         if currentIndex > 0 {
             currentIndex -= 1
@@ -554,7 +578,8 @@ final class PlaybackController: ObservableObject {
 
     var canGoPrevious: Bool {
         guard !queue.isEmpty else { return false }
-        if settings.shuffleMode != .off, !shuffleHistory.isEmpty { return true }
+        if settings.shuffleMode != .off,
+           shuffleHistory.contains(where: { $0 != currentTrack?.id }) { return true }
         return currentIndex > 0 || settings.repeatMode == .all
     }
 
@@ -612,7 +637,7 @@ final class PlaybackController: ObservableObject {
         setCurrent(trackID: queue[currentIndex])
         position = item.startTime
         engine.load(item: item, autoplay: autoplay)
-        isPlaying = autoplay
+        isPlaying = autoplay && engine.isPlaying
         library.markPlayed(queue[currentIndex])
         if settings.shuffleMode != .off {
             shuffleHistory.append(queue[currentIndex])

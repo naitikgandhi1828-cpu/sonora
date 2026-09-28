@@ -56,6 +56,7 @@ enum HallParam: AUParameterAddress {
     case early        = 10  // 0...1 — early-reflection level
     case width        = 11  // 0...1 — stereo width of the wet signal
     case freeze       = 12  // 0/1 — infinite sustain, no new input
+    case clarity      = 13  // 0...1 — ducks the reverb while vocals are present
 }
 
 // MARK: - Render state
@@ -113,6 +114,18 @@ private struct HallState {
     var lfoRotSin: Float = 0
     var modDepth: Float = 0                         // samples
 
+    // Vocal clarity: a sidechain follows the vocal band of the dry signal and
+    // turns the reverb down while someone is singing, so words stay clear
+    // and the tail blooms in the gaps between phrases.
+    var scHPCoef: Float = 0
+    var scLPCoef: Float = 1
+    var scHP: Float = 0
+    var scLP: Float = 0
+    var scEnv: Float = 0
+    var scAttack: Float = 0.01
+    var scRelease: Float = 0.0001
+    var duckDepth: Float = 0
+
     // Mix.
     var inputGain: Float = 1
     var wetGain: Float = 0.5
@@ -134,6 +147,9 @@ private struct HallState {
     var early: Float = 0.4
     var width: Float = 1
     var freeze: Float = 0
+    var clarity: Float = 0.6
+    /// Output trim that keeps dry + wet from pushing the limiter into distortion.
+    var headroom: Float = 1
 
     var sampleRate: Float = 48_000
 
@@ -346,7 +362,8 @@ public final class HallReverbUnit: AUAudioUnit {
             p(.modulation,  "modulation", "Modulation",   0,    1,     0.35, .generic),
             p(.early,       "early",      "Early",        0,    1,     0.4,  .generic),
             p(.width,       "width",      "Width",        0,    1,     1,    .generic),
-            p(.freeze,      "freeze",     "Freeze",       0,    1,     0,    .boolean)
+            p(.freeze,      "freeze",     "Freeze",       0,    1,     0,    .boolean),
+            p(.clarity,     "clarity",    "Vocal Clarity", 0,   1,     0.6,  .generic)
         ]
 
         let tree = AUParameterTree.createTree(withChildren: params)
@@ -384,6 +401,7 @@ public final class HallReverbUnit: AUAudioUnit {
         case .early:       st.pointee.early = max(0, min(1, v))
         case .width:       st.pointee.width = max(0, min(1, v))
         case .freeze:      st.pointee.freeze = v > 0.5 ? 1 : 0
+        case .clarity:     st.pointee.clarity = max(0, min(1, v.isFinite ? v : 0))
         case .none:        break
         }
     }
@@ -410,6 +428,7 @@ public final class HallReverbUnit: AUAudioUnit {
         case .early:       return st.pointee.early
         case .width:       return st.pointee.width
         case .freeze:      return st.pointee.freeze
+        case .clarity:     return st.pointee.clarity
         case .none:        return 0
         }
     }
@@ -475,12 +494,27 @@ public final class HallReverbUnit: AUAudioUnit {
         let w = 2 * Float.pi * lfoHz / sr
         st.pointee.lfoRotCos = cosf(w)
         st.pointee.lfoRotSin = sinf(w)
-        st.pointee.modDepth = s.modulation * maxModSeconds * sr
+        let depth = s.modulation * maxModSeconds * sr
+        st.pointee.modDepth = depth.isFinite ? max(0, min(depth, maxModSeconds * sr)) : 0
 
-        // Mix: equal power so the lower half of the control is audible.
+        // Vocal-clarity sidechain: band-pass 250 Hz – 4 kHz (where the voice
+        // lives), fast attack so the reverb drops as a word starts, slow
+        // release so it swells back smoothly instead of pumping.
+        st.pointee.scHPCoef = 1 - expf(-2 * .pi * 250 / sr)
+        st.pointee.scLPCoef = 1 - expf(-2 * .pi * min(4_000, sr * 0.45) / sr)
+        st.pointee.scAttack = 1 - expf(-1 / (0.008 * sr))
+        st.pointee.scRelease = 1 - expf(-1 / (0.32 * sr))
+        st.pointee.duckDepth = frozen ? 0 : s.clarity * 9
+
+        // Mix. The dry signal stays at full level up to 50% so the song never
+        // loses detail under the reverb; past that it fades out smoothly.
         st.pointee.inputGain = frozen ? 0 : 1
-        st.pointee.wetGain = sqrtf(s.mix) * 0.9
-        st.pointee.dryGain = sqrtf(1 - s.mix)
+        let wet = sqrtf(max(0, s.mix)) * 0.9
+        st.pointee.wetGain = wet
+        st.pointee.dryGain = min(1, sqrtf(max(0, 2 * (1 - s.mix))))
+        // A little headroom proportional to the reverb level, so the extra
+        // energy doesn't drive the limiter into audible distortion.
+        st.pointee.headroom = 1 / (1 + 0.35 * wet)
         st.pointee.widthMid = 1
         st.pointee.widthSide = s.width
     }
@@ -498,6 +532,7 @@ public final class HallReverbUnit: AUAudioUnit {
         st.pointee.lpL = 0; st.pointee.lpR = 0
         st.pointee.hpL = 0; st.pointee.hpR = 0
         st.pointee.lfoSin = 0; st.pointee.lfoCos = 1
+        st.pointee.scHP = 0; st.pointee.scLP = 0; st.pointee.scEnv = 0
     }
 
     // MARK: Resources
@@ -543,6 +578,7 @@ public final class HallReverbUnit: AUAudioUnit {
 
             let outList = UnsafeMutableAudioBufferListPointer(outputData)
             let outCount = outList.count
+            if outCount == 0 { return kAudioUnitErr_NoConnection }
             for i in 0..<outCount where outList[i].mData == nil {
                 outList[i].mData = inList[min(i, 1)].mData
                 outList[i].mDataByteSize = bytes
@@ -595,6 +631,11 @@ public final class HallReverbUnit: AUAudioUnit {
             let inputGain = s.inputGain
             let wetGain = s.wetGain, dryGain = s.dryGain
             let side = s.widthSide
+            let headroom = s.headroom
+            let scHPCoef = s.scHPCoef, scLPCoef = s.scLPCoef
+            let scAttack = s.scAttack, scRelease = s.scRelease
+            let duckDepth = s.duckDepth
+            var scHP = s.scHP, scLP = s.scLP, scEnv = s.scEnv
 
             var lineWrite = s.lineWrite
             var diffWrite = s.diffWrite
@@ -603,6 +644,8 @@ public final class HallReverbUnit: AUAudioUnit {
             var lpL = s.lpL, lpR = s.lpR
             var hpL = s.hpL, hpR = s.hpR
             var lfoS = s.lfoSin, lfoC = s.lfoCos
+            // Never let a bad value reach the Int() conversions below.
+            if !(lfoS.isFinite && lfoC.isFinite) { lfoS = 0; lfoC = 1 }
 
             // Tiny alternating offset keeps the loop filters out of the
             // denormal range when the input goes silent.
@@ -766,8 +809,17 @@ public final class HallReverbUnit: AUAudioUnit {
                 let outWL = mid + sideSig
                 let outWR = mid - sideSig
 
-                let yL = xL * dryGain + outWL * wetGain
-                let yR = xR * dryGain + outWR * wetGain
+                // Vocal-clarity sidechain on the dry mid signal.
+                let midIn = (xL + xR) * 0.5
+                scHP += (midIn - scHP) * scHPCoef
+                scLP += ((midIn - scHP) - scLP) * scLPCoef
+                let level = scLP < 0 ? -scLP : scLP
+                scEnv += (level - scEnv) * (level > scEnv ? scAttack : scRelease)
+                let duck = 1 / (1 + duckDepth * scEnv)
+
+                let wg = wetGain * duck
+                let yL = (xL * dryGain + outWL * wg) * headroom
+                let yR = (xR * dryGain + outWR * wg) * headroom
                 outL[n] = yL
                 if outR != outL { outR[n] = yR }
                 n += 1
@@ -775,7 +827,7 @@ public final class HallReverbUnit: AUAudioUnit {
 
             // Keep the LFO phasor on the unit circle (it drifts slowly).
             let mag = sqrtf(lfoS * lfoS + lfoC * lfoC)
-            if mag > 0 {
+            if mag.isFinite && mag > 0 {
                 lfoS /= mag
                 lfoC /= mag
             } else {
@@ -790,6 +842,9 @@ public final class HallReverbUnit: AUAudioUnit {
             st.pointee.lpL = lpL; st.pointee.lpR = lpR
             st.pointee.hpL = hpL; st.pointee.hpR = hpR
             st.pointee.lfoSin = lfoS; st.pointee.lfoCos = lfoC
+            st.pointee.scHP = scHP.isFinite ? scHP : 0
+            st.pointee.scLP = scLP.isFinite ? scLP : 0
+            st.pointee.scEnv = scEnv.isFinite ? scEnv : 0
             return noErr
         }
     }
