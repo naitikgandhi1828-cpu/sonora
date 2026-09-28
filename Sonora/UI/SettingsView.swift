@@ -12,8 +12,11 @@ struct SettingsView: View {
     @EnvironmentObject private var library: MediaLibrary
     @EnvironmentObject private var themes: ThemeManager
     @EnvironmentObject private var artwork: ArtworkFinder
+    @EnvironmentObject private var player: PlaybackController
 
     @State private var showFolderPicker = false
+    /// Folder waiting for the user to confirm its removal.
+    @State private var folderToRemove: FolderRoot?
     @State private var confirmWipe = false
     @State private var artworkSize: Int64 = 0
 
@@ -58,8 +61,31 @@ struct SettingsView: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .overlay(alignment: .trailing) {
+                    // Visible way in: swipe-to-remove alone was too hidden.
+                    Menu {
+                        Button { Task { await library.rescan(rootID: root.id) } } label: {
+                            Label("Rescan", systemImage: "arrow.clockwise")
+                        }
+                        Button(role: .destructive) { folderToRemove = root } label: {
+                            Label("Remove from Library", systemImage: "trash")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.system(size: 18))
+                            .foregroundStyle(themes.accent)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                }
+                .contextMenu {
+                    Button(role: .destructive) { folderToRemove = root } label: {
+                        Label("Remove from Library", systemImage: "trash")
+                    }
+                }
                 .swipeActions {
-                    Button(role: .destructive) { library.removeRoot(root) } label: {
+                    Button(role: .destructive) { folderToRemove = root } label: {
                         Label("Remove", systemImage: "trash")
                     }
                     Button { Task { await library.rescan(rootID: root.id) } } label: {
@@ -74,7 +100,21 @@ struct SettingsView: View {
         } header: {
             Text("Music Folders")
         } footer: {
-            Text("Sonora reads files in place. You can also copy music into the Sonora folder in the Files app.")
+            Text("Sonora reads files in place. Tap ••• on a folder to rescan or remove it. Removing a folder only takes it out of Sonora — your music files are never deleted. You can also copy music into the Sonora folder in the Files app.")
+        }
+        .confirmationDialog("Remove “\(folderToRemove?.displayName ?? "")” from Sonora?",
+                            isPresented: Binding(get: { folderToRemove != nil },
+                                                 set: { if !$0 { folderToRemove = nil } }),
+                            titleVisibility: .visible,
+                            presenting: folderToRemove) { root in
+            Button("Remove Folder", role: .destructive) {
+                library.removeRoot(root)
+                player.pruneQueue()
+                folderToRemove = nil
+            }
+            Button("Cancel", role: .cancel) { folderToRemove = nil }
+        } message: { root in
+            Text("Its \(root.trackCount) tracks leave your library and playlists. The files themselves stay where they are, and you can add the folder again any time.")
         }
     }
 
@@ -92,6 +132,7 @@ struct SettingsView: View {
             Toggle("Pause when headphones disconnect", isOn: $settings.pauseOnDisconnect)
             Toggle("Resume when headphones connect", isOn: $settings.resumeOnHeadphones)
             Toggle("Restore last track on launch", isOn: $settings.resumeOnLaunch)
+            Toggle("Lock screen skips seconds, not songs", isOn: $settings.lockScreenSkipButtons)
             LabeledSlider(title: "Skip step", value: $settings.seekStepSeconds, range: 5...60, step: 5,
                           format: { String(format: "%.0f s", $0) })
             LabeledSlider(title: "Previous restarts track after", value: $settings.rewindOnPrevSeconds,
