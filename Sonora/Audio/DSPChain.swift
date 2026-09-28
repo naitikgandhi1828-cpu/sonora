@@ -7,16 +7,17 @@
 //  Signal flow:
 //
 //    playerA ─┐
-//             ├─▶ sourceMixer ─▶ EQ ─▶ Tone ─▶ Freeverb ─▶ Reverb2 ─▶ Spatial
-//    playerB ─┘   (crossfade,     (10-band   (bass/   (custom)    (Apple)    (binaural
-//                  replay gain)   parametric) treble)                         widener)
+//             ├─▶ sourceMixer ─▶ EQ ─▶ Tone ─▶ Studio ─▶ Freeverb ─▶ Reverb2 ─▶ Spatial
+//    playerB ─┘   (crossfade,     (10-band   (bass/   (FDN)     (classic)   (Apple)    (binaural
+//                  replay gain)   parametric) treble)                                   widener)
 //
 //                                          ─▶ TimePitch ─▶ SonoraDSP ─▶ out
 //                                             (rate/       (pre-amp, width,
 //                                              pitch)       balance, limiter)
 //
-//  The two reverb nodes are mutually exclusive: whichever engine the user has
-//  not selected is bypassed, so only one is ever in circuit.
+//  The three reverb nodes are mutually exclusive: whichever engines the user
+//  has not selected are bypassed (with a zero-cost pass-through), so only one
+//  is ever in circuit.
 //
 //  Spatial sits after the reverbs so the tail gets widened along with the dry
 //  signal, and before the master stage so the limiter still has the last word
@@ -36,6 +37,8 @@ final class DSPChain {
     /// Both stay wired into the graph and the unused one is bypassed, so
     /// switching engines costs nothing and never needs a graph rebuild.
     let freeverb: AVAudioUnitEffect?
+    /// Studio engine: Sonora's eight-line FDN reverb (HallReverbUnit).
+    let hall: AVAudioUnitEffect?
     /// Binaural spatialiser. Nil if the component failed to register, in which
     /// case the feature simply does not appear in the UI.
     let spatial: AVAudioUnitEffect?
@@ -48,6 +51,7 @@ final class DSPChain {
     /// Effect nodes in signal order, skipping anything that failed to load.
     var orderedNodes: [AVAudioNode] {
         var nodes: [AVAudioNode] = [eq, tone]
+        if let hall { nodes.append(hall) }
         if let freeverb { nodes.append(freeverb) }
         nodes.append(reverb.node)
         if let spatial { nodes.append(spatial) }
@@ -72,6 +76,14 @@ final class DSPChain {
             freeverb = nil
         }
 
+        HallReverbUnit.registerIfNeeded()
+        if AudioComponentFindNext(nil, &DSPChain.hallDesc) != nil {
+            hall = AVAudioUnitEffect(audioComponentDescription: HallReverbUnit.componentDescription)
+        } else {
+            print("[DSPChain] Studio reverb unavailable")
+            hall = nil
+        }
+
         SpatialUnit.registerIfNeeded()
         if AudioComponentFindNext(nil, &DSPChain.spatialDesc) != nil {
             spatial = AVAudioUnitEffect(audioComponentDescription: SpatialUnit.componentDescription)
@@ -91,11 +103,18 @@ final class DSPChain {
         configureToneBands()
         applyAll()
         observeSettings()
+
+        // Per-output EQ memory lives on the main actor; DSPChain does not.
+        let s = settings
+        Task { @MainActor in
+            EQRouteMemory.shared.start(settings: s)
+        }
     }
 
     private static var sonoraDesc = SonoraDSPUnit.componentDescription
     private static var freeverbDesc = FreeverbUnit.componentDescription
     private static var spatialDesc = SpatialUnit.componentDescription
+    private static var hallDesc = HallReverbUnit.componentDescription
 
     // MARK: - Setup
 
@@ -142,6 +161,7 @@ final class DSPChain {
         onChange(s.$eqEnabled) { [weak self] in self?.applyEQ() }
         onChange(s.$eqBands) { [weak self] in self?.applyEQ() }
         onChange(s.$eqPreampDB) { [weak self] in self?.applyEQ() }
+        onChange(s.$eqAutoPreamp) { [weak self] in self?.applyEQ() }
 
         // Tone
         onChange(s.$toneEnabled) { [weak self] in self?.applyTone() }
@@ -160,6 +180,20 @@ final class DSPChain {
         onChange(s.$reverbPreDelayMix) { [weak self] in self?.applyReverb() }
         onChange(s.$reverbSize) { [weak self] in self?.applyReverb() }
         onChange(s.$reverbUseFreeverb) { [weak self] in self?.applyReverb() }
+        onChange(s.$reverbEngine) { [weak self] in self?.applyReverb() }
+        onChange(s.$studioMix) { [weak self] in self?.applyReverb() }
+        onChange(s.$studioDecay) { [weak self] in self?.applyReverb() }
+        onChange(s.$studioSize) { [weak self] in self?.applyReverb() }
+        onChange(s.$studioPreDelayMS) { [weak self] in self?.applyReverb() }
+        onChange(s.$studioBassDecay) { [weak self] in self?.applyReverb() }
+        onChange(s.$studioTrebleDecay) { [weak self] in self?.applyReverb() }
+        onChange(s.$studioLowCut) { [weak self] in self?.applyReverb() }
+        onChange(s.$studioHighCut) { [weak self] in self?.applyReverb() }
+        onChange(s.$studioDiffusion) { [weak self] in self?.applyReverb() }
+        onChange(s.$studioModulation) { [weak self] in self?.applyReverb() }
+        onChange(s.$studioEarly) { [weak self] in self?.applyReverb() }
+        onChange(s.$studioWidth) { [weak self] in self?.applyReverb() }
+        onChange(s.$studioFreeze) { [weak self] in self?.applyReverb() }
 
         // Spatial
         onChange(s.$spatialEnabled) { [weak self] in self?.applySpatial() }
@@ -208,7 +242,16 @@ final class DSPChain {
     private func applyEQ() {
         let on = settings.eqEnabled
         eq.bypass = !on
-        eq.globalGain = on ? Float(max(-24, min(24, settings.eqPreampDB))) : 0
+        // Auto pre-amp: pull the global gain down by the curve's highest boost
+        // so boosted bands can't clip; the user's pre-amp still wins if lower.
+        var preamp = settings.eqPreampDB
+        if on && settings.eqAutoPreamp {
+            let active = Array(settings.eqBands.prefix(eq.bands.count))
+            let sr = AVAudioSession.sharedInstance().sampleRate
+            let boost = EQResponse.maxBoostDB(bands: active, sampleRate: sr > 0 ? sr : 48_000)
+            preamp = min(preamp, -boost)
+        }
+        eq.globalGain = on ? Float(max(-24, min(24, preamp))) : 0
         for (i, band) in settings.eqBands.enumerated() where i < eq.bands.count {
             let node = eq.bands[i]
             node.filterType = band.type.avFilterType
@@ -233,15 +276,21 @@ final class DSPChain {
 
     private func applyReverb() {
         let on = settings.reverbEnabled
-        let useFreeverb = settings.reverbUseFreeverb && freeverb != nil
+        // The chosen engine, falling back towards Apple's if a custom unit
+        // failed to load.
+        let useStudio = settings.reverbEngine == .studio && hall != nil
+        let useFreeverb = !useStudio && settings.reverbEngine == .classic && freeverb != nil
+        let useApple = !useStudio && !useFreeverb
 
-        // Exactly one engine is ever in circuit; the other is bypassed, which
-        // costs nothing and avoids stacking two reverbs in series.
-        reverb.setBypassed(!on || useFreeverb)
+        // Exactly one engine is ever in circuit; the others are bypassed,
+        // which costs nothing and avoids stacking reverbs in series.
+        reverb.setBypassed(!on || !useApple)
         freeverb?.bypass = !on || !useFreeverb
         // Set on the AU directly too, so the unit's own fast path (which
         // skips all DSP) engages whether or not AVFoundation forwards it.
         freeverb?.auAudioUnit.shouldBypassEffect = !on || !useFreeverb
+        hall?.bypass = !on || !useStudio
+        hall?.auAudioUnit.shouldBypassEffect = !on || !useStudio
 
         guard on else {
             // Belt and braces, for the same reason as the EQ: an effect that is
@@ -251,10 +300,14 @@ final class DSPChain {
             // dry is what makes "off" audibly off.
             reverb.setMix(0)
             setFreeverb(.mix, 0)
+            setHall(.mix, 0)
+            setHall(.freeze, 0)
             return
         }
 
-        if useFreeverb {
+        if useStudio {
+            applyStudio()
+        } else if useFreeverb {
             applyFreeverb()
         } else {
             // AUReverb2 has no equivalent of Filter or Pre-Delay Mix, and its
@@ -267,6 +320,28 @@ final class DSPChain {
                          preDelay: settings.reverbPreDelay * 0.2)
             reverb.setMix(settings.reverbMix * 100)
         }
+    }
+
+    private func setHall(_ addr: HallParam, _ value: Float) {
+        hall?.auAudioUnit.parameterTree?.parameter(withAddress: addr.rawValue)?.value = value
+    }
+
+    private func applyStudio() {
+        guard hall != nil else { return }
+        let s = settings
+        setHall(.mix, Float(max(0, min(1, s.studioMix))))
+        setHall(.decay, Float(max(0.2, min(20, s.studioDecay))))
+        setHall(.size, Float(max(0, min(1, s.studioSize))))
+        setHall(.preDelay, Float(max(0, min(250, s.studioPreDelayMS))))
+        setHall(.bassDecay, Float(max(0.5, min(2, s.studioBassDecay))))
+        setHall(.trebleDecay, Float(max(0.1, min(1, s.studioTrebleDecay))))
+        setHall(.lowCut, Float(max(20, min(600, s.studioLowCut))))
+        setHall(.highCut, Float(max(1000, min(20_000, s.studioHighCut))))
+        setHall(.diffusion, Float(max(0, min(1, s.studioDiffusion))))
+        setHall(.modulation, Float(max(0, min(1, s.studioModulation))))
+        setHall(.early, Float(max(0, min(1, s.studioEarly))))
+        setHall(.width, Float(max(0, min(1, s.studioWidth))))
+        setHall(.freeze, s.studioFreeze ? 1 : 0)
     }
 
     private func setFreeverb(_ addr: FreeverbParam, _ value: Float) {
