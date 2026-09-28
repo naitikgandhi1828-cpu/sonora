@@ -17,6 +17,15 @@ struct FolderBrowserView: View {
     @EnvironmentObject private var player: PlaybackController
     @EnvironmentObject private var themes: ThemeManager
 
+    /// Top-level folder waiting for the user to confirm its removal.
+    @State private var folderToRemove: FolderRoot?
+
+    /// The library root a child node stands for, if it is a top-level folder.
+    private func root(for child: FolderNode) -> FolderRoot? {
+        guard child.path.isEmpty, let id = child.rootID else { return nil }
+        return library.roots.first { $0.id == id }
+    }
+
     var body: some View {
         List {
             if !node.children.isEmpty {
@@ -44,6 +53,12 @@ struct FolderBrowserView: View {
                             Button {
                                 player.enqueue(collectTracks(child), playNext: false)
                             } label: { Label("Add to Queue", systemImage: "text.append") }
+                            if let root = root(for: child) {
+                                Divider()
+                                Button(role: .destructive) { folderToRemove = root } label: {
+                                    Label("Remove from Library", systemImage: "trash")
+                                }
+                            }
                         }
                     }
                 }
@@ -67,6 +82,20 @@ struct FolderBrowserView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .confirmationDialog("Remove “\(folderToRemove?.displayName ?? "")” from Sonora?",
+                            isPresented: Binding(get: { folderToRemove != nil },
+                                                 set: { if !$0 { folderToRemove = nil } }),
+                            titleVisibility: .visible,
+                            presenting: folderToRemove) { root in
+            Button("Remove Folder", role: .destructive) {
+                library.removeRoot(root)
+                player.pruneQueue()
+                folderToRemove = nil
+            }
+            Button("Cancel", role: .cancel) { folderToRemove = nil }
+        } message: { _ in
+            Text("Your music files stay where they are. You can add the folder again from Settings.")
+        }
         .navigationTitle(node.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
