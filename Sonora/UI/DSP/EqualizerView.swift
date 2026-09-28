@@ -27,7 +27,11 @@ struct EqualizerView: View {
                 outputRow
                 responseCurve
                 bandSliders
-                if let index = selectedBand { bandDetail(index: index) }
+                // The band list can be replaced underneath a selection (a
+                // preset or per-device EQ loading), so re-check the index.
+                if let index = selectedBand, settings.eqBands.indices.contains(index) {
+                    bandDetail(index: index)
+                }
                 preampRow
                 presetSection
             }
@@ -102,7 +106,7 @@ struct EqualizerView: View {
         HStack(alignment: .bottom, spacing: 4) {
             ForEach(settings.eqBands.indices, id: \.self) { i in
                 EQBandSlider(
-                    band: $settings.eqBands[i],
+                    band: bandBinding(i),
                     range: gainRange,
                     isSelected: selectedBand == i,
                     enabled: settings.eqEnabled,
@@ -120,7 +124,7 @@ struct EqualizerView: View {
     private func bandDetail(index: Int) -> some View {
         VStack(spacing: 10) {
             HStack {
-                Text("Band \(index + 1) · \(frequencyLabel(settings.eqBands[index].frequency))")
+                Text("Band \(index + 1) · \(frequencyLabel(bandBinding(index).wrappedValue.frequency))")
                     .font(.system(size: 14, weight: .semibold))
                 Spacer()
                 Button { selectedBand = nil } label: {
@@ -130,8 +134,8 @@ struct EqualizerView: View {
             }
 
             Picker("Filter", selection: Binding(
-                get: { settings.eqBands[index].type },
-                set: { settings.eqBands[index].type = $0; settings.selectedPresetName = "Custom" }
+                get: { bandBinding(index).wrappedValue.type },
+                set: { newType in updateBand(index) { $0.type = newType }; settings.selectedPresetName = "Custom" }
             )) {
                 ForEach(EQBandType.allCases) { Text($0.label).tag($0) }
             }
@@ -140,25 +144,28 @@ struct EqualizerView: View {
 
             LabeledSlider(title: "Frequency",
                           value: Binding(
-                            get: { Double(settings.eqBands[index].frequency) },
-                            set: { settings.eqBands[index].frequency = Float($0); settings.selectedPresetName = "Custom" }),
+                            get: { Double(bandBinding(index).wrappedValue.frequency) },
+                            set: { newValue in updateBand(index) { $0.frequency = Float(newValue) }; settings.selectedPresetName = "Custom" }),
                           range: 20...20000,
                           format: { frequencyLabel(Float($0)) },
                           onReset: {
-                            settings.eqBands[index].frequency = EQPreset.standardFrequencies[index]
+                            // Bands past the standard ten have no default.
+                            if EQPreset.standardFrequencies.indices.contains(index) {
+                                updateBand(index) { $0.frequency = EQPreset.standardFrequencies[index] }
+                            }
                           })
 
             LabeledSlider(title: "Bandwidth (Q)",
                           value: Binding(
-                            get: { Double(settings.eqBands[index].bandwidth) },
-                            set: { settings.eqBands[index].bandwidth = Float($0); settings.selectedPresetName = "Custom" }),
+                            get: { Double(bandBinding(index).wrappedValue.bandwidth) },
+                            set: { newValue in updateBand(index) { $0.bandwidth = Float(newValue) }; settings.selectedPresetName = "Custom" }),
                           range: 0.05...5,
                           format: { String(format: "%.2f oct", $0) },
-                          onReset: { settings.eqBands[index].bandwidth = 0.5 })
+                          onReset: { updateBand(index) { $0.bandwidth = 0.5 } })
 
             Toggle("Bypass this band", isOn: Binding(
-                get: { settings.eqBands[index].bypass },
-                set: { settings.eqBands[index].bypass = $0 }
+                get: { bandBinding(index).wrappedValue.bypass },
+                set: { newValue in updateBand(index) { $0.bypass = newValue } }
             ))
             .font(.system(size: 13))
             .tint(themes.accent)
@@ -255,6 +262,33 @@ struct EqualizerView: View {
         return String(format: "\u{2212}%.1f dB applied", boost)
     }
 
+    /// A binding to one band that tolerates the array changing size.
+    ///
+    /// `$settings.eqBands[i]` captures the index and traps when SwiftUI reads
+    /// or writes it after the array has shrunk - which is what happens when a
+    /// saved preset or per-device EQ with a different band count is loaded
+    /// while the sliders are on screen. Out-of-range reads return a flat
+    /// placeholder and out-of-range writes are dropped.
+    private func bandBinding(_ index: Int) -> Binding<EQBand> {
+        let settings = self.settings
+        return Binding(
+            get: {
+                settings.eqBands.indices.contains(index)
+                    ? settings.eqBands[index]
+                    : EQBand(frequency: 1000)
+            },
+            set: { newValue in
+                guard settings.eqBands.indices.contains(index) else { return }
+                settings.eqBands[index] = newValue
+            })
+    }
+
+    /// Edits one band in place, ignoring an index that no longer exists.
+    private func updateBand(_ index: Int, _ change: (inout EQBand) -> Void) {
+        guard settings.eqBands.indices.contains(index) else { return }
+        change(&settings.eqBands[index])
+    }
+
     private func frequencyLabel(_ hz: Float) -> String {
         hz >= 1000 ? String(format: "%.1fk", hz / 1000).replacingOccurrences(of: ".0k", with: "k")
                    : String(format: "%.0f", hz)
@@ -341,9 +375,10 @@ struct EQBandSlider: View {
         let hz = band.frequency
         if hz >= 1000 {
             let k = hz / 1000
-            return k == k.rounded() ? "\(Int(k))k" : String(format: "%.1fk", k)
+            // Formatted, not `Int(...)`: that traps on NaN / infinity.
+            return k == k.rounded() ? String(format: "%.0fk", k) : String(format: "%.1fk", k)
         }
-        return "\(Int(hz))"
+        return String(format: "%.0f", hz)
     }
 }
 

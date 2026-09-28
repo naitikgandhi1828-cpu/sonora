@@ -36,6 +36,12 @@ struct StudioReverbView: View {
             presetGrid
 
             section("Space") {
+                LabeledSlider(title: "Vocal clarity", value: $settings.reverbClarity, range: 0...1,
+                              format: { String(format: "%.0f%%", $0 * 100) },
+                              onReset: { settings.reverbClarity = 0.6 })
+                Text("Turns the reverb down while someone is singing, so lyrics stay clear.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(themes.theme.textSecondary)
                 LabeledSlider(title: "Mix", value: bind(\.studioMix), range: 0...1,
                               format: { String(format: "%.0f%%", $0 * 100) },
                               onReset: { reset(\.studioMix, to: Self.defaults.mix) })

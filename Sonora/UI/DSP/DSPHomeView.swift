@@ -150,6 +150,11 @@ struct EffectsRackView: View {
     /// Apple (AUReverb2) engines.
     private var classicReverbControls: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if settings.reverbEngine == .classic {
+                LabeledSlider(title: "Vocal clarity", value: $settings.reverbClarity, range: 0...1,
+                              format: { String(format: "%.0f%%", $0 * 100) },
+                              onReset: { settings.reverbClarity = 0.6 })
+            }
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text("Room")
