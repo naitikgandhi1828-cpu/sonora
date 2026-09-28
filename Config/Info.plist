@@ -13,30 +13,5 @@
 	</array>
 	<key>UIFileSharingEnabled</key>
 	<true/>
-	<!-- CarPlay audio browsing. INFOPLIST_KEY_UIApplicationSceneManifest_Generation
-	     is NO for this target so Xcode does not generate a competing manifest;
-	     this one is the whole thing. Only the CarPlay role is declared: the
-	     SwiftUI App lifecycle supplies the phone/iPad window scene itself.
-	     CarPlay also needs the com.apple.developer.carplay-audio entitlement
-	     (Config/Sonora.entitlements) on the signing profile. -->
-	<key>UIApplicationSceneManifest</key>
-	<dict>
-		<key>UIApplicationSupportsMultipleScenes</key>
-		<true/>
-		<key>UISceneConfigurations</key>
-		<dict>
-			<key>CPTemplateApplicationSceneSessionRoleApplication</key>
-			<array>
-				<dict>
-					<key>UISceneClassName</key>
-					<string>CPTemplateApplicationScene</string>
-					<key>UISceneConfigurationName</key>
-					<string>CarPlay</string>
-					<key>UISceneDelegateClassName</key>
-					<string>$(PRODUCT_MODULE_NAME).CarPlaySceneDelegate</string>
-				</dict>
-			</array>
-		</dict>
-	</dict>
 </dict>
 </plist>
