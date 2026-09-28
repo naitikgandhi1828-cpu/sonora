@@ -39,9 +39,13 @@ final class AudioSessionManager: ObservableObject {
     func activate() {
         let session = AVAudioSession.sharedInstance()
         do {
+            // Standard routing, the same as Music and Spotify. The
+            // `.longFormAudio` policy used before routes through a separate
+            // long-form path that CarPlay and some car head units don't
+            // treat as the system's Now Playing source.
             try session.setCategory(.playback,
                                     mode: .default,
-                                    policy: .longFormAudio,
+                                    policy: .default,
                                     options: [])
             try session.setActive(true, options: [])
         } catch {
