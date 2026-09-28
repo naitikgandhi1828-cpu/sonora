@@ -42,7 +42,12 @@ struct SettingsView: View {
             }
             .alert("Erase library?", isPresented: $confirmWipe) {
                 Button("Cancel", role: .cancel) {}
-                Button("Erase", role: .destructive) { library.wipeLibrary() }
+                Button("Erase", role: .destructive) {
+                    library.wipeLibrary()
+                    // The queue (and whatever is playing) now points at tracks
+                    // that no longer exist; drop them like a removed folder.
+                    player.pruneQueue()
+                }
             } message: {
                 Text("This removes Sonora's index, artwork cache and playlists. Your audio files are never touched.")
             }
