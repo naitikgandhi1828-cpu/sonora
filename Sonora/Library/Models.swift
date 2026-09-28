@@ -115,10 +115,12 @@ struct Track: Identifiable, Codable, Hashable {
 
     var qualityBadge: String {
         var parts: [String] = [fileExtension.uppercased()]
-        if let bd = bitDepth, sampleRate > 0 {
-            parts.append("\(bd)/\(Int(sampleRate / 1000))k")
-        } else if sampleRate > 0 {
-            parts.append("\(Int(sampleRate / 1000))k")
+        // Formatted rather than `Int(...)`, which traps on NaN / infinity.
+        let khz = String(format: "%.0f", sampleRate / 1000)
+        if let bd = bitDepth, sampleRate > 0, sampleRate.isFinite {
+            parts.append("\(bd)/\(khz)k")
+        } else if sampleRate > 0, sampleRate.isFinite {
+            parts.append("\(khz)k")
         }
         if let br = bitrate, br > 0, bitDepth == nil {
             parts.append("\(br)kbps")

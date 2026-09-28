@@ -106,7 +106,10 @@ actor LibraryIndexer {
                 t.trackTotal = sheet.entries.count
                 t.cueStart = entry.startTime
                 t.cueEnd = entry.endTime ?? totalDuration
-                t.duration = (entry.endTime ?? totalDuration) - entry.startTime
+                // Multi-FILE sheets restart their INDEX times per file, so the
+                // "next start" can come before this one. Never store a
+                // negative length.
+                t.duration = max(0, (entry.endTime ?? totalDuration) - entry.startTime)
                 t.artworkKey = artKey
                 result.tracks.append(t)
             }

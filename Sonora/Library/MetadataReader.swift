@@ -46,14 +46,16 @@ enum MetadataReader {
             let descriptions = (try? await audioTrack.load(.formatDescriptions)) ?? []
             for desc in descriptions {
                 if let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee {
-                    track.sampleRate = asbd.mSampleRate
+                    // Shown later through `Int(sampleRate / 1000)`, which traps
+                    // on NaN or infinity.
+                    track.sampleRate = asbd.mSampleRate.isFinite ? max(0, asbd.mSampleRate) : 0
                     track.channelCount = Int(asbd.mChannelsPerFrame)
                     if asbd.mBitsPerChannel > 0 { track.bitDepth = Int(asbd.mBitsPerChannel) }
                     track.codec = fourCC(asbd.mFormatID)
                 }
             }
             let dataRate = try? await audioTrack.load(.estimatedDataRate)
-            if let rate = dataRate, rate > 0 {
+            if let rate = dataRate, rate > 0, rate.isFinite, rate < 1e9 {
                 track.bitrate = Int(rate / 1000)
             }
         }

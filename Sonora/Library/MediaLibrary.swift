@@ -41,7 +41,7 @@ final class MediaLibrary: ObservableObject {
     // MARK: - Lookup
 
     func track(id: UUID) -> Track? {
-        guard let idx = trackIndex[id], idx < tracks.count else { return nil }
+        guard let idx = liveIndex(of: id) else { return nil }
         return tracks[idx]
     }
 
@@ -201,12 +201,12 @@ final class MediaLibrary: ObservableObject {
         // Preserve play counts / ratings across a rescan.
         var stats: [String: (Int, Date?, Int)] = [:]
         for t in tracks where t.rootID == rootID {
-            stats[t.relativePath + "|" + String(Int(t.cueStart ?? -1))] = (t.playCount, t.lastPlayed, t.rating)
+            stats[t.relativePath + "|" + Self.cueKey(t.cueStart)] = (t.playCount, t.lastPlayed, t.rating)
         }
 
         var merged = result.tracks
         for i in merged.indices {
-            let key = merged[i].relativePath + "|" + String(Int(merged[i].cueStart ?? -1))
+            let key = merged[i].relativePath + "|" + Self.cueKey(merged[i].cueStart)
             if let s = stats[key] {
                 merged[i].playCount = s.0
                 merged[i].lastPlayed = s.1
@@ -234,6 +234,14 @@ final class MediaLibrary: ObservableObject {
         save()
     }
 
+    /// Whole-second cue offset as a merge key. `Int(Double)` traps on NaN,
+    /// infinity or out-of-range values, which a malformed cue sheet can give.
+    private static func cueKey(_ start: TimeInterval?) -> String {
+        guard let start else { return "-1" }
+        guard start.isFinite, abs(start) < 1e12 else { return "x" }
+        return String(Int(start))
+    }
+
     func cancelScan() {
         Task { await indexer.cancel() }
         isScanning = false
@@ -242,8 +250,17 @@ final class MediaLibrary: ObservableObject {
 
     // MARK: - Mutations
 
+    /// Position of a track in `tracks`, verified. The index map is rebuilt
+    /// after every structural change, but a stale entry must never become an
+    /// out-of-range subscript (a crash) or silently edit the wrong track.
+    private func liveIndex(of id: UUID) -> Int? {
+        guard let idx = trackIndex[id], tracks.indices.contains(idx),
+              tracks[idx].id == id else { return nil }
+        return idx
+    }
+
     func markPlayed(_ id: UUID) {
-        guard let idx = trackIndex[id] else { return }
+        guard let idx = liveIndex(of: id) else { return }
         tracks[idx].playCount += 1
         tracks[idx].lastPlayed = Date()
         recentlyPlayedIDs.removeAll { $0 == id }
@@ -253,7 +270,7 @@ final class MediaLibrary: ObservableObject {
     }
 
     func setRating(_ rating: Int, for id: UUID) {
-        guard let idx = trackIndex[id] else { return }
+        guard let idx = liveIndex(of: id) else { return }
         tracks[idx].rating = max(0, min(5, rating))
         scheduleSave()
     }
@@ -273,7 +290,7 @@ final class MediaLibrary: ObservableObject {
     }
 
     func setMeasuredGain(_ gain: Float, peak: Float, for id: UUID) {
-        guard let idx = trackIndex[id] else { return }
+        guard let idx = liveIndex(of: id) else { return }
         if tracks[idx].replayGainTrack == nil { tracks[idx].replayGainTrack = gain }
         if tracks[idx].peakTrack == nil { tracks[idx].peakTrack = peak }
         scheduleSave()
@@ -296,15 +313,24 @@ final class MediaLibrary: ObservableObject {
         save()
     }
 
-    func removeFromPlaylist(_ playlistID: UUID, at offsets: IndexSet) {
+    func removeFromPlaylist(_ playlistID: UUID, at rawOffsets: IndexSet) {
         guard let idx = playlists.firstIndex(where: { $0.id == playlistID }) else { return }
+        // `remove(atOffsets:)` traps on an out-of-range offset.
+        let count = playlists[idx].trackIDs.count
+        let offsets = IndexSet(rawOffsets.filter { $0 >= 0 && $0 < count })
+        guard !offsets.isEmpty else { return }
         playlists[idx].trackIDs.remove(atOffsets: offsets)
         playlists[idx].dateModified = Date()
         save()
     }
 
-    func movePlaylistItems(_ playlistID: UUID, from: IndexSet, to: Int) {
+    func movePlaylistItems(_ playlistID: UUID, from rawFrom: IndexSet, to rawTo: Int) {
         guard let idx = playlists.firstIndex(where: { $0.id == playlistID }) else { return }
+        // `move(fromOffsets:toOffset:)` traps on out-of-range indices.
+        let count = playlists[idx].trackIDs.count
+        let from = IndexSet(rawFrom.filter { $0 >= 0 && $0 < count })
+        guard !from.isEmpty else { return }
+        let to = max(0, min(rawTo, count))
         playlists[idx].trackIDs.move(fromOffsets: from, toOffset: to)
         playlists[idx].dateModified = Date()
         save()
@@ -511,11 +537,16 @@ final class MediaLibrary: ObservableObject {
         let snapshot = Snapshot(roots: roots, tracks: tracks,
                                 playlists: playlists, recentlyPlayed: recentlyPlayedIDs)
         let url = storeURL
-        DispatchQueue.global(qos: .utility).async {
+        // One serial queue: concurrent writers could otherwise land out of
+        // order, and an older snapshot could overwrite a newer one (or
+        // resurrect a library that was just erased).
+        Self.saveQueue.async {
             guard let data = try? JSONEncoder().encode(snapshot) else { return }
             try? data.write(to: url, options: .atomic)
         }
     }
+
+    private static let saveQueue = DispatchQueue(label: "sonora.library.save", qos: .utility)
 
     private func scheduleSave() {
         saveWorkItem?.cancel()
@@ -527,11 +558,19 @@ final class MediaLibrary: ObservableObject {
     }
 
     func wipeLibrary() {
+        // A batched save still pending would write the old library back.
+        saveWorkItem?.cancel()
+        saveWorkItem = nil
+        if isScanning { cancelScan() }
         FolderAccessManager.shared.releaseAll()
         roots.removeAll(); tracks.removeAll(); playlists.removeAll(); recentlyPlayedIDs.removeAll()
         trackIndex.removeAll()
         ArtworkStore.shared.clear()
         Task { await WaveformAnalyzer.shared.clearCache() }
-        try? FileManager.default.removeItem(at: storeURL)
+        // Queued behind any save already in flight, so none can land after it.
+        let url = storeURL
+        Self.saveQueue.async {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 }

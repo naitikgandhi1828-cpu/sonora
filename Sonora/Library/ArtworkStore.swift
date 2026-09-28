@@ -72,13 +72,33 @@ final class ArtworkStore {
         let thumb = directory.appendingPathComponent("\(key)_t.jpg")
 
         if FileManager.default.fileExists(atPath: full.path) { return key }
-        guard let image = UIImage(data: data) else { return nil }
+        // Embedded covers can be enormous (a 6000px scan is ~144 MB decoded).
+        // `UIImage(data:)` + draw decodes the whole thing first, which is how a
+        // scan gets the app killed for memory. ImageIO decodes straight to the
+        // size we keep, so no cover costs more than a 1000px bitmap.
+        guard let image = Self.decode(data, maxPixel: 1000) else { return nil }
 
         let resized = image.resized(maxDimension: 1000)
         try? resized.jpegData(compressionQuality: 0.88)?.write(to: full, options: .atomic)
         let thumbnail = image.resized(maxDimension: 200)
         try? thumbnail.jpegData(compressionQuality: 0.8)?.write(to: thumb, options: .atomic)
         return key
+    }
+
+    /// Same as `decode(_:maxPixel:)` but from bytes in memory.
+    private static func decode(_ data: Data, maxPixel: CGFloat) -> UIImage? {
+        guard !data.isEmpty,
+              let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return UIImage(cgImage: cg)
     }
 
     func image(forKey key: String?) -> UIImage? {

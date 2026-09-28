@@ -15,6 +15,8 @@ final class FolderAccessManager {
 
     private var resolvedRoots: [UUID: URL] = [:]
     private var openScopes: [UUID: URL] = [:]
+    /// Standalone file bookmarks already resolved (scope held open).
+    private var standaloneScopes: [Data: (url: URL, scoped: Bool)] = [:]
     private let lock = NSLock()
 
     private init() {}
@@ -69,12 +71,26 @@ final class FolderAccessManager {
 
     /// Resolves a standalone file bookmark (a track imported on its own).
     func resolveStandalone(_ bookmark: Data) -> URL? {
+        // Resolved once per launch. This runs every time a standalone track is
+        // queued or chained, and each call used to open another security
+        // scope that was never closed; the sandbox caps how many can be open,
+        // after which files silently stop opening.
+        lock.lock()
+        if let cached = standaloneScopes[bookmark] {
+            lock.unlock()
+            return cached.url
+        }
+        lock.unlock()
+
         var stale = false
         guard let url = try? URL(resolvingBookmarkData: bookmark,
                                  options: [],
                                  relativeTo: nil,
                                  bookmarkDataIsStale: &stale) else { return nil }
-        _ = url.startAccessingSecurityScopedResource()
+        let scoped = url.startAccessingSecurityScopedResource()
+        lock.lock()
+        standaloneScopes[bookmark] = (url, scoped)
+        lock.unlock()
         return url
     }
 
@@ -90,7 +106,11 @@ final class FolderAccessManager {
     func releaseAll() {
         lock.lock()
         for (_, url) in openScopes { url.stopAccessingSecurityScopedResource() }
+        for (_, entry) in standaloneScopes where entry.scoped {
+            entry.url.stopAccessingSecurityScopedResource()
+        }
         openScopes.removeAll()
+        standaloneScopes.removeAll()
         resolvedRoots.removeAll()
         lock.unlock()
     }

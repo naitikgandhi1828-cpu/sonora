@@ -94,12 +94,18 @@ enum CueSheetParser {
     /// "MM:SS:FF" where FF is frames at 75 fps.
     static func parseTimestamp(_ s: String) -> TimeInterval {
         let parts = s.split(separator: ":").compactMap { Double($0) }
+        let value: Double
         switch parts.count {
-        case 3: return parts[0] * 60 + parts[1] + parts[2] / 75.0
-        case 2: return parts[0] * 60 + parts[1]
-        case 1: return parts[0]
-        default: return 0
+        case 3: value = parts[0] * 60 + parts[1] + parts[2] / 75.0
+        case 2: value = parts[0] * 60 + parts[1]
+        case 1: value = parts[0]
+        default: value = 0
         }
+        // `Double("nan")` / `Double("inf")` parse, and a garbage stamp can be
+        // astronomically large; either later traps in an Int or frame
+        // conversion. Keep it finite, non-negative and under ~11 days.
+        guard value.isFinite else { return 0 }
+        return min(max(0, value), 1_000_000)
     }
 
     private static func firstQuoted(in line: String) -> String? {
@@ -164,7 +170,8 @@ enum M3UParser {
     static func write(_ tracks: [Track], name: String, resolver: (Track) -> String) -> String {
         var out = "#EXTM3U\n"
         for t in tracks {
-            out += "#EXTINF:\(Int(t.duration.rounded())),\(t.displayArtist) - \(t.displayTitle)\n"
+            let seconds = t.duration.isFinite ? Int(max(-1, min(t.duration, 1e9)).rounded()) : -1
+            out += "#EXTINF:\(seconds),\(t.displayArtist) - \(t.displayTitle)\n"
             out += resolver(t) + "\n"
         }
         return out
