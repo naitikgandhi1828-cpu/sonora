@@ -46,7 +46,10 @@ struct WaveformSeekBar: View {
 
     private var fraction: Double {
         if isScrubbing { return scrubFraction }
-        return min(1, max(0, (position - lowerBound) / span))
+        let f = (position - lowerBound) / span
+        // NaN would flow into `.frame(width:)` and `.offset`.
+        guard f.isFinite else { return 0 }
+        return min(1, max(0, f))
     }
 
     var body: some View {
@@ -148,8 +151,10 @@ private struct WaveformLayer: View, Equatable {
 
     var body: some View {
         Canvas { context, size in
-            let count = waveform.peaks.count
-            guard count > 0 else { return }
+            // `rms[i]` is read alongside `peaks[i]`; never trust the two arrays
+            // to be the same length.
+            let count = min(waveform.peaks.count, waveform.rms.count)
+            guard count > 0, size.width > 0, size.height > 0 else { return }
             let spacing = size.width / Double(count)
             let barWidth = max(1.0, spacing * 0.62)
             let mid = size.height / 2
@@ -179,12 +184,18 @@ struct SlimProgressBar: View {
 
     @EnvironmentObject private var themes: ThemeManager
 
+    /// 0...1, with NaN (0/0 from an unknown length) treated as 0.
+    private var clampedFraction: CGFloat {
+        guard fraction.isFinite else { return 0 }
+        return CGFloat(min(1, max(0, fraction)))
+    }
+
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
                 Rectangle().fill(themes.theme.textSecondary.opacity(0.2))
                 Rectangle().fill(themes.accent)
-                    .frame(width: geo.size.width * min(1, max(0, fraction)))
+                    .frame(width: max(0, geo.size.width * clampedFraction))
             }
         }
         .frame(height: height)

@@ -166,7 +166,8 @@ struct NowPlayingView: View {
                              hasPrevious: player.canGoPrevious,
                              hasNext: player.canGoNext,
                              onPrevious: { player.previous(allowRestart: false) },
-                             onNext: { player.next(userInitiated: true) })
+                             onNext: { player.next(userInitiated: true) },
+                             onSwipeDown: { showQueue = true })
 
                 if settings.visualizerAllowed && player.isPlaying {
                     SpectrumView(meters: player.meters)
@@ -286,7 +287,8 @@ struct NowPlayingView: View {
     private var secondaryButtons: some View {
         HStack(spacing: 26) {
             Button { player.skipBackward(); Haptics.tap() } label: {
-                Label("\(Int(settings.seekStepSeconds))", systemImage: "gobackward")
+                // Formatted, not `Int(...)`: a corrupt stored value (NaN) would trap.
+                Label(String(format: "%.0f", settings.seekStepSeconds), systemImage: "gobackward")
                     .labelStyle(.iconOnly)
                     .font(.system(size: 18))
             }
@@ -360,9 +362,18 @@ private struct ArtworkPager: View {
     let hasNext: Bool
     let onPrevious: () -> Void
     let onNext: () -> Void
+    /// Pulling the artwork down opens the queue.
+    var onSwipeDown: () -> Void = {}
 
     @State private var dragX: CGFloat = 0
+    /// Vertical follow-the-finger offset for the swipe-down-to-queue gesture.
+    @State private var dragY: CGFloat = 0
     @State private var isSettling = false
+    /// Locked on the first movement so a drag is either a track swipe or a
+    /// queue pull, never a diagonal mix of both.
+    @State private var axis: DragAxis = .undecided
+
+    private enum DragAxis { case undecided, horizontal, vertical }
 
     private var gap: CGFloat { max(18, side * 0.08) }
     private var step: CGFloat { side + gap }
@@ -386,6 +397,9 @@ private struct ArtworkPager: View {
         // The strip is three covers wide; this frame crops the view back to one
         // and centres it, so the neighbours sit just off screen at rest.
         .frame(width: side, height: side)
+        // Swipe-down: the cover sinks and shrinks slightly under the finger.
+        .scaleEffect(1 - min(0.12, dragY / 1600))
+        .offset(y: dragY)
         .contentShape(Rectangle())
         .simultaneousGesture(drag)
     }
@@ -403,9 +417,17 @@ private struct ArtworkPager: View {
         DragGesture(minimumDistance: 16)
             .onChanged { value in
                 guard !isSettling else { return }
-                // Ignore anything that is really a vertical gesture, so pulling
-                // the player down to dismiss it still works.
-                guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                if axis == .undecided {
+                    axis = abs(value.translation.width) > abs(value.translation.height)
+                        ? .horizontal : .vertical
+                }
+                if axis == .vertical {
+                    // Only downward pulls do anything; follow the finger with
+                    // a little resistance so it feels attached, not loose.
+                    let down = max(0, value.translation.height)
+                    dragY = down < 120 ? down * 0.75 : 90 + (down - 120) * 0.3
+                    return
+                }
 
                 let raw = value.translation.width
                 let atEnd = (raw < 0 && !hasNext) || (raw > 0 && !hasPrevious)
@@ -414,7 +436,20 @@ private struct ArtworkPager: View {
                 dragX = atEnd ? raw * 0.2 : raw
             }
             .onEnded { value in
+                let endedAxis = axis
+                axis = .undecided
                 guard !isSettling else { return }
+
+                if endedAxis == .vertical {
+                    let pulled = value.translation.height > 80
+                        || value.predictedEndTranslation.height > 220
+                    if pulled {
+                        Haptics.tap()
+                        onSwipeDown()
+                    }
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) { dragY = 0 }
+                    return
+                }
 
                 let travelled = value.translation.width
                 let flick = value.predictedEndTranslation.width
@@ -477,7 +512,7 @@ struct TrackInfoView: View {
                 Section("Audio") {
                     row("Format", track.fileExtension.uppercased())
                     row("Codec", track.codec.isEmpty ? "—" : track.codec)
-                    row("Sample Rate", track.sampleRate > 0 ? "\(Int(track.sampleRate)) Hz" : "—")
+                    row("Sample Rate", track.sampleRate > 0 ? String(format: "%.0f Hz", track.sampleRate) : "—")
                     row("Bit Depth", track.bitDepth.map { "\($0)-bit" } ?? "—")
                     row("Channels", "\(track.channelCount)")
                     row("Bitrate", track.bitrate.map { "\($0) kbps" } ?? "—")
