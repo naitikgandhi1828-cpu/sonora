@@ -31,6 +31,10 @@ struct SonoraApp: App {
         let artwork = ArtworkFinder(settings: settings, library: library)
         player.artworkFinder = artwork
 
+        // Non-SwiftUI consumers (CarPlay) reach the same instances through this.
+        AppServices.library = library
+        AppServices.player = player
+
         _settings = StateObject(wrappedValue: settings)
         _library = StateObject(wrappedValue: library)
         _player = StateObject(wrappedValue: player)
