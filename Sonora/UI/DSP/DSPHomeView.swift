@@ -106,6 +106,50 @@ struct EffectsRackView: View {
 
     private var reverbCard: some View {
         card(title: "Reverb", symbol: "square.stack.3d.down.right", isOn: $settings.reverbEnabled) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Engine")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(themes.theme.textPrimary)
+                Picker("Engine", selection: $settings.reverbEngine) {
+                    ForEach(ReverbEngine.allCases) { engine in
+                        Text(engine.label).tag(engine)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text(settings.reverbEngine.blurb)
+                    .font(.system(size: 11))
+                    .foregroundStyle(themes.theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if (settings.reverbEngine == .studio && player.dsp.hall == nil)
+                    || (settings.reverbEngine == .classic && player.dsp.freeverb == nil) {
+                    Text("This engine could not be loaded on this device, so Apple's reverb is playing instead.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(themes.theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .onChange(of: settings.reverbEngine) { _, engine in
+                // Older code still reads the Freeverb/Apple flag.
+                switch engine {
+                case .classic: settings.reverbUseFreeverb = true
+                case .apple: settings.reverbUseFreeverb = false
+                case .studio: break
+                }
+                Haptics.select()
+            }
+
+            if settings.reverbEngine == .studio {
+                StudioReverbView()
+            } else {
+                classicReverbControls
+            }
+        }
+    }
+
+    /// The Poweramp-style control set, shared by the Classic (Freeverb) and
+    /// Apple (AUReverb2) engines.
+    private var classicReverbControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text("Room")
@@ -138,23 +182,11 @@ struct EffectsRackView: View {
                 }
             }
 
-            if player.dsp.freeverb != nil {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Engine")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(themes.theme.textPrimary)
-                    Picker("Engine", selection: $settings.reverbUseFreeverb) {
-                        Text("Freeverb").tag(true)
-                        Text("Apple").tag(false)
-                    }
-                    .pickerStyle(.segmented)
-                    Text(settings.reverbUseFreeverb
-                         ? "Eight comb filters into four allpass diffusers. Denser and warmer, and the only engine that responds to every control below."
-                         : "Apple's AUReverb2. Cleaner and less coloured, but it takes its dimensions from a fixed preset list — Filter and Pre-Delay Mix do nothing here, and Size snaps to the nearest room it has.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(themes.theme.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+            if settings.reverbEngine == .apple {
+                Text("Apple's AUReverb2 takes its dimensions from a fixed preset list — Filter and Pre-Delay Mix do nothing here, and Size snaps to the nearest room it has.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(themes.theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Group {

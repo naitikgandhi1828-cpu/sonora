@@ -12,6 +12,7 @@ struct EqualizerView: View {
 
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var themes: ThemeManager
+    @ObservedObject private var routeMemory = EQRouteMemory.shared
 
     @State private var selectedBand: Int?
     @State private var showSavePreset = false
@@ -23,6 +24,7 @@ struct EqualizerView: View {
         ScrollView {
             VStack(spacing: 18) {
                 enableRow
+                outputRow
                 responseCurve
                 bandSliders
                 if let index = selectedBand { bandDetail(index: index) }
@@ -60,6 +62,30 @@ struct EqualizerView: View {
             }
             .tint(themes.accent)
         }
+        .foregroundStyle(themes.theme.textPrimary)
+    }
+
+    private var outputRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: "hifispeaker.and.homepod")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(themes.accent)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Output").font(.system(size: 15, weight: .semibold))
+                    Text("EQ for: \(routeMemory.currentRouteLabel)")
+                        .font(.system(size: 12))
+                        .foregroundStyle(themes.theme.textSecondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+            }
+            Toggle("Separate EQ per device", isOn: $settings.eqPerDevice)
+                .font(.system(size: 13))
+                .tint(themes.accent)
+        }
+        .padding(14)
+        .cardBackground(themes.theme)
         .foregroundStyle(themes.theme.textPrimary)
     }
 
@@ -150,6 +176,18 @@ struct EqualizerView: View {
                           range: -12...12,
                           format: { String(format: "%+.1f dB", $0) },
                           onReset: { settings.eqPreampDB = 0 })
+
+            VStack(alignment: .leading, spacing: 3) {
+                Toggle("Auto pre-amp (prevent clipping)", isOn: $settings.eqAutoPreamp)
+                    .font(.system(size: 13))
+                    .tint(themes.accent)
+                if settings.eqAutoPreamp {
+                    Text(autoPreampCaption)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(themes.theme.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
         }
         .padding(14)
         .cardBackground(themes.theme)
@@ -203,6 +241,18 @@ struct EqualizerView: View {
         .padding(14)
         .cardBackground(themes.theme)
         .foregroundStyle(themes.theme.textPrimary)
+    }
+
+    /// How much the automatic pre-amp is pulling the level down right now.
+    private var autoPreampCaption: String {
+        guard settings.eqEnabled else { return "Applies while the equalizer is on" }
+        let boost = EQResponse.maxBoostDB(bands: settings.eqBands)
+        guard boost >= 0.05 else { return "No boost to compensate" }
+        // DSPChain uses min(pre-amp, -boost), so a lower manual pre-amp wins.
+        if settings.eqPreampDB <= -boost {
+            return String(format: "Pre-amp already covers the +%.1f dB peak", boost)
+        }
+        return String(format: "\u{2212}%.1f dB applied", boost)
     }
 
     private func frequencyLabel(_ hz: Float) -> String {
@@ -364,30 +414,9 @@ struct EQCurveView: View {
         .padding(.vertical, 8)
     }
 
-    /// Sum of each band's approximate magnitude response, in dB.
+    /// Exact magnitude response of the band chain plus the pre-amp, in dB.
     private func response(at hz: Double) -> Double {
-        var total = Double(preamp)
-        for band in bands where !band.bypass {
-            let f0 = Double(band.frequency)
-            let gain = Double(band.gain)
-            let bw = Double(max(0.05, band.bandwidth))
-            switch band.type {
-            case .lowShelf, .resonantLowShelf:
-                total += gain / (1 + pow(hz / f0, 2))
-            case .highShelf, .resonantHighShelf:
-                total += gain / (1 + pow(f0 / hz, 2))
-            case .lowPass, .resonantLowPass:
-                total += -12 * log2(max(1, hz / f0))
-            case .highPass, .resonantHighPass:
-                total += -12 * log2(max(1, f0 / hz))
-            case .bandStop:
-                let octaves = log2(hz / f0)
-                total += -abs(gain.isZero ? 12 : gain) * exp(-pow(octaves / bw, 2) * 2)
-            default:
-                let octaves = log2(hz / f0)
-                total += gain * exp(-pow(octaves / bw, 2) * 2)
-            }
-        }
+        let total = Double(preamp) + EQResponse.magnitudeDB(at: hz, bands: bands)
         return max(-15, min(15, total))
     }
 }
