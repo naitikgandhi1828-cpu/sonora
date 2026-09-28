@@ -18,6 +18,9 @@ jobs:
     # macos-15 ships Xcode 16, which this project needs.
     # macos-26 also works if you'd rather be on the newest image.
     runs-on: macos-15
+    # Needed only by the last step, which publishes the IPA to a branch.
+    permissions:
+      contents: write
 
     steps:
       - name: Check out the project
@@ -80,3 +83,18 @@ jobs:
           name: Sonora-ipa
           path: Sonora.ipa
           retention-days: 30
+
+      # Also publish the IPA to a one-file `builds` branch, so it can be
+      # fetched with plain git (artifacts need a signed-in browser).
+      - name: Publish IPA to the builds branch
+        run: |
+          set -e
+          cp Sonora.ipa "$RUNNER_TEMP/Sonora.ipa"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan builds-publish
+          git rm -rf --quiet .
+          cp "$RUNNER_TEMP/Sonora.ipa" Sonora.ipa
+          git add Sonora.ipa
+          git commit -m "Sonora.ipa from ${GITHUB_REF_NAME} @ ${GITHUB_SHA::7} (run ${GITHUB_RUN_NUMBER})"
+          git push -f origin HEAD:builds
