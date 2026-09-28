@@ -111,6 +111,8 @@ final class AppSettings: ObservableObject {
     @Published var repeatMode: RepeatMode { didSet { save(repeatMode.rawValue, "repeatMode") } }
     @Published var shuffleMode: ShuffleMode { didSet { save(shuffleMode.rawValue, "shuffleMode") } }
     @Published var resumeOnLaunch: Bool { didSet { save(resumeOnLaunch, "resumeLaunch") } }
+    /// Lock screen / CarPlay show ±seek-step buttons instead of previous/next track.
+    @Published var lockScreenSkipButtons: Bool { didSet { save(lockScreenSkipButtons, "lockSkip") } }
 
     // MARK: Tempo / pitch
 
@@ -256,6 +258,7 @@ final class AppSettings: ObservableObject {
         repeatMode = RepeatMode(rawValue: i("repeatMode", 1)) ?? .all
         shuffleMode = ShuffleMode(rawValue: i("shuffleMode", 0)) ?? .off
         resumeOnLaunch = b("resumeLaunch", true)
+        lockScreenSkipButtons = b("lockSkip", false)
 
         playbackRate = n("rate", 1.0)
         pitchCents = n("pitch", 0)
