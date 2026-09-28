@@ -72,7 +72,10 @@ struct FolderBrowserView: View {
                                  isPlaying: player.currentTrack?.id == track.id && player.isPlaying)
                             .contentShape(Rectangle())
                             .onTapGesture {
-                                player.play(trackIDs: node.trackIDs, startIndex: index,
+                                // `index` counts only tracks that still exist,
+                                // so queue that same list.
+                                player.play(trackIDs: library.tracks(ids: node.trackIDs).map(\.id),
+                                            startIndex: index,
                                             sourceName: node.name)
                                 Haptics.tap()
                             }
@@ -416,34 +419,63 @@ struct TrackListView: View {
     @EnvironmentObject private var themes: ThemeManager
     @State private var query = ""
 
-    private var tracks: [Track] {
-        var list = library.tracks(ids: trackIDs)
+    /// One row: a track plus its position in the (live) id list.
+    ///
+    /// Rows used to be identified by track id, but a playlist can hold the
+    /// same track twice, and duplicate ids in a List are undefined behaviour
+    /// that ends in a collection-view crash on delete or move. The slot is
+    /// unique, and it is also what delete/move must be translated back to:
+    /// the row index is not the playlist index once missing tracks are
+    /// skipped or a filter is applied.
+    private struct Entry: Identifiable {
+        let slot: Int
+        let track: Track
+        var id: Int { slot }
+    }
+
+    /// For a playlist, read its ids live so edits made here are reflected
+    /// even if the navigation destination was built with an older copy.
+    private var liveTrackIDs: [UUID] {
+        if let playlistID, let playlist = library.playlists.first(where: { $0.id == playlistID }) {
+            return playlist.trackIDs
+        }
+        return trackIDs
+    }
+
+    private var entries: [Entry] {
+        var list: [Entry] = liveTrackIDs.enumerated().compactMap { slot, id in
+            library.track(id: id).map { Entry(slot: slot, track: $0) }
+        }
         if !query.isEmpty {
             let q = query.lowercased()
             list = list.filter {
-                $0.displayTitle.lowercased().contains(q)
-                || $0.displayArtist.lowercased().contains(q)
-                || $0.displayAlbum.lowercased().contains(q)
+                $0.track.displayTitle.lowercased().contains(q)
+                || $0.track.displayArtist.lowercased().contains(q)
+                || $0.track.displayAlbum.lowercased().contains(q)
             }
         }
         if playlistID == nil {
-            list.sort(by: settings.trackSort.comparator(ascending: settings.trackSortAscending))
+            let compare = settings.trackSort.comparator(ascending: settings.trackSortAscending)
+            list.sort { compare($0.track, $1.track) }
         }
         return list
     }
 
+    private var tracks: [Track] { entries.map(\.track) }
+
     var body: some View {
         List {
             if groupByAlbum {
-                let grouped = Dictionary(grouping: tracks, by: \.albumKey)
+                let grouped = Dictionary(grouping: entries, by: { $0.track.albumKey })
                 ForEach(grouped.keys.sorted(), id: \.self) { key in
-                    let items = (grouped[key] ?? []).sorted(by: TrackSort.trackNumber.comparator(ascending: true))
-                    Section(items.first?.displayAlbum ?? "") {
+                    let byNumber = TrackSort.trackNumber.comparator(ascending: true)
+                    let items = (grouped[key] ?? []).sorted { byNumber($0.track, $1.track) }
+                    Section(items.first?.track.displayAlbum ?? "") {
                         rows(items)
                     }
                 }
             } else {
-                rows(tracks)
+                rows(entries)
             }
         }
         .listStyle(.plain)
@@ -480,31 +512,51 @@ struct TrackListView: View {
         }
     }
 
-    private var deleteHandler: ((IndexSet) -> Void)? {
+    /// Row offsets are positions in `items`; the library wants positions in
+    /// the playlist, which is what each entry's slot records.
+    private func deleteHandler(_ items: [Entry]) -> ((IndexSet) -> Void)? {
         guard let id = playlistID else { return nil }
-        return { offsets in library.removeFromPlaylist(id, at: offsets) }
+        return { offsets in
+            let slots = offsets.compactMap { items.indices.contains($0) ? items[$0].slot : nil }
+            library.removeFromPlaylist(id, at: IndexSet(slots))
+        }
     }
 
-    private var moveHandler: ((IndexSet, Int) -> Void)? {
+    private func moveHandler(_ items: [Entry]) -> ((IndexSet, Int) -> Void)? {
         guard let id = playlistID else { return nil }
-        return { from, to in library.movePlaylistItems(id, from: from, to: to) }
+        let total = liveTrackIDs.count
+        return { from, to in
+            let slots = from.compactMap { items.indices.contains($0) ? items[$0].slot : nil }
+            guard !slots.isEmpty else { return }
+            // Dropping past the last visible row means "after it".
+            let target: Int
+            if items.indices.contains(to) {
+                target = items[to].slot
+            } else if let last = items.last {
+                target = min(last.slot + 1, total)
+            } else {
+                target = total
+            }
+            library.movePlaylistItems(id, from: IndexSet(slots), to: target)
+        }
     }
 
     @ViewBuilder
-    private func rows(_ items: [Track]) -> some View {
-        ForEach(Array(items.enumerated()), id: \.element.id) { index, track in
+    private func rows(_ items: [Entry]) -> some View {
+        ForEach(Array(items.enumerated()), id: \.element.id) { index, entry in
+            let track = entry.track
             TrackRow(track: track,
                      isCurrent: player.currentTrack?.id == track.id,
                      isPlaying: player.currentTrack?.id == track.id && player.isPlaying)
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    player.play(trackIDs: items.map(\.id), startIndex: index, sourceName: title)
+                    player.play(trackIDs: items.map(\.track.id), startIndex: index, sourceName: title)
                     Haptics.tap()
                 }
                 .trackContextMenu(track: track)
         }
-        .onDelete(perform: deleteHandler)
-        .onMove(perform: moveHandler)
+        .onDelete(perform: deleteHandler(items))
+        .onMove(perform: moveHandler(items))
     }
 }
 
