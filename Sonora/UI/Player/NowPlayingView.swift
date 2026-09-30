@@ -21,8 +21,14 @@ struct NowPlayingView: View {
     @State private var showDSP = false
     @State private var showSleep = false
     @State private var showInfo = false
+    @State private var showLyrics = false
+    @State private var editTarget: TagEditTarget?
 
     private var track: Track? { player.currentTrack }
+
+    private var hasLyrics: Bool {
+        !(track?.lyrics ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var body: some View {
         ZStack {
@@ -35,6 +41,12 @@ struct NowPlayingView: View {
         .sheet(isPresented: $showSleep) { SleepTimerView().presentationDetents([.medium]) }
         .sheet(isPresented: $showInfo) {
             if let track { TrackInfoView(track: track).presentationDetents([.medium, .large]) }
+        }
+        .sheet(item: $editTarget) { target in
+            TagEditorView(trackIDs: target.trackIDs)
+        }
+        .sheet(isPresented: $showLyrics) {
+            LyricsView().presentationDetents([.medium, .large])
         }
         .onChange(of: player.currentArtwork) { _, image in
             themes.updateArtworkAccent(from: image)
@@ -127,6 +139,14 @@ struct NowPlayingView: View {
             Spacer()
             Menu {
                 Button { showInfo = true } label: { Label("Track Info", systemImage: "info.circle") }
+                if let track {
+                    Button {
+                        editTarget = TagEditTarget(trackIDs: [track.id])
+                    } label: { Label("Edit Tags", systemImage: "tag") }
+                }
+                if hasLyrics {
+                    Button { showLyrics = true } label: { Label("Lyrics", systemImage: "quote.bubble") }
+                }
                 Button { showQueue = true } label: { Label("Play Queue", systemImage: "list.bullet") }
                 Button { showDSP = true } label: { Label("Equalizer & DSP", systemImage: "slider.horizontal.3") }
                 Button { showSleep = true } label: { Label("Sleep Timer", systemImage: "moon.zzz") }
@@ -484,8 +504,12 @@ struct TrackInfoView: View {
     @EnvironmentObject private var library: MediaLibrary
     @EnvironmentObject private var themes: ThemeManager
     @Environment(\.dismiss) private var dismiss
+    @State private var editTarget: TagEditTarget?
 
     var body: some View {
+        // Live copy, so edits made from the Edit Tags button show here at once.
+        let track = library.track(id: self.track.id) ?? self.track
+
         NavigationStack {
             List {
                 Section {
@@ -537,7 +561,17 @@ struct TrackInfoView: View {
             }
             .navigationTitle("Track Info")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        editTarget = TagEditTarget(trackIDs: [track.id])
+                    } label: { Label("Edit Tags", systemImage: "tag") }
+                }
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+            .sheet(item: $editTarget) { target in
+                TagEditorView(trackIDs: target.trackIDs)
+            }
         }
     }
 
