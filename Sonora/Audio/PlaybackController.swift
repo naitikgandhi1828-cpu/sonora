@@ -657,6 +657,19 @@ final class PlaybackController: ObservableObject {
         artworkFinder?.findIfMissing(for: track)
     }
 
+    /// Re-reads the playing track from the library after its tags or cover
+    /// were edited, so Now Playing, the mini player and the lock screen show
+    /// the new values straight away. Playback itself is untouched.
+    func refreshCurrentTrackFromLibrary() {
+        guard let current = currentTrack,
+              let fresh = library.track(id: current.id) else { return }
+        currentTrack = fresh
+        if fresh.artworkKey != current.artworkKey || currentArtwork == nil {
+            currentArtwork = ArtworkStore.shared.image(forKey: fresh.artworkKey)
+        }
+        refreshNowPlaying()
+    }
+
     private func itemForIndex(_ index: Int?) -> PlayableItem? {
         guard let index, queue.indices.contains(index),
               let track = library.track(id: queue[index]) else { return nil }
