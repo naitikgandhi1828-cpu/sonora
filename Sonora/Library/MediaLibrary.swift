@@ -31,11 +31,21 @@ final class MediaLibrary: ObservableObject {
     private var trackIndex: [UUID: Int] = [:]
     private var saveWorkItem: DispatchWorkItem?
 
+    /// Tag edits made in Sonora, keyed by `tagOverrideKey(for:)`. Applied on
+    /// top of freshly read metadata every time a file is (re)indexed, so
+    /// edits survive rescans for formats Sonora cannot write, for cue-sheet
+    /// tracks, and for writes that failed. Removed once a write succeeds.
+    private(set) var tagOverrides: [String: TagSet] = [:]
+    /// Covers chosen in the tag editor, same keys. An empty string means the
+    /// user removed the cover on purpose.
+    private(set) var artworkOverrides: [String: String] = [:]
+
     // MARK: Init
 
     init(settings: AppSettings) {
         self.settings = settings
         load()
+        loadOverrides()
     }
 
     // MARK: - Lookup
@@ -99,6 +109,14 @@ final class MediaLibrary: ObservableObject {
         }
         playlists.removeAll { $0.trackIDs.isEmpty && $0.importedFrom != nil }
         recentlyPlayedIDs.removeAll { removedIDs.contains($0) }
+        let prefix = root.id.uuidString + "|"
+        let hadOverrides = tagOverrides.keys.contains { $0.hasPrefix(prefix) }
+            || artworkOverrides.keys.contains { $0.hasPrefix(prefix) }
+        if hadOverrides {
+            tagOverrides = tagOverrides.filter { !$0.key.hasPrefix(prefix) }
+            artworkOverrides = artworkOverrides.filter { !$0.key.hasPrefix(prefix) }
+            saveOverrides()
+        }
         rebuildIndex()
         save()
     }
@@ -125,6 +143,7 @@ final class MediaLibrary: ObservableObject {
             if let data = info.artwork {
                 info.track.artworkKey = ArtworkStore.shared.store(data, forAlbumKey: info.track.albumKey)
             }
+            applyOverrides(to: &info.track)
             if tracks.contains(where: { $0.standaloneBookmark != nil && $0.fileName == info.track.fileName
                                         && abs($0.duration - info.track.duration) < 0.5 }) {
                 continue
@@ -157,6 +176,7 @@ final class MediaLibrary: ObservableObject {
             if let data = info.artwork {
                 info.track.artworkKey = ArtworkStore.shared.store(data, forAlbumKey: info.track.albumKey)
             }
+            applyOverrides(to: &info.track)
             tracks.append(info.track)
             added += 1
         }
@@ -212,6 +232,8 @@ final class MediaLibrary: ObservableObject {
                 merged[i].lastPlayed = s.1
                 merged[i].rating = s.2
             }
+            // Edits made in Sonora win over what the file says.
+            applyOverrides(to: &merged[i])
         }
 
         tracks.removeAll { $0.rootID == rootID }
@@ -283,6 +305,8 @@ final class MediaLibrary: ObservableObject {
     func setArtworkKey(_ key: String, forAlbumKey albumKey: String) {
         var changed = false
         for i in tracks.indices where tracks[i].albumKey == albumKey && tracks[i].artworkKey != key {
+            // A cover the user picked (or removed) in the tag editor wins.
+            if artworkOverrides[Self.tagOverrideKey(for: tracks[i])] != nil { continue }
             tracks[i].artworkKey = key
             changed = true
         }
@@ -294,6 +318,202 @@ final class MediaLibrary: ObservableObject {
         if tracks[idx].replayGainTrack == nil { tracks[idx].replayGainTrack = gain }
         if tracks[idx].peakTrack == nil { tracks[idx].peakTrack = peak }
         scheduleSave()
+    }
+
+    // MARK: - Tag editing
+
+    /// Stable identity of a track's file across rescans (track IDs are
+    /// regenerated on every scan, so they cannot key anything persistent).
+    static func tagOverrideKey(for track: Track) -> String {
+        "\(track.rootID?.uuidString ?? "file")|\(track.relativePath)|\(cueKey(track.cueStart))"
+    }
+
+    /// Whether `applyTagEdit` can write into this track's own file. Cue-sheet
+    /// tracks share one file with their siblings, so they are library-only.
+    static func canWriteTags(to track: Track) -> Bool {
+        !track.isCueTrack && TagWriter.canWrite(fileExtension: track.fileExtension)
+    }
+
+    /// True when the user picked or removed this track's cover in the editor,
+    /// so automatic artwork lookups should leave it alone.
+    func hasArtworkOverride(_ track: Track) -> Bool {
+        artworkOverrides[Self.tagOverrideKey(for: track)] != nil
+    }
+
+    /// Applies every set field of `tags` to `track`. Strings: "" clears.
+    /// Numbers: 0 (or less) clears.
+    static func apply(_ tags: TagSet, to track: inout Track) {
+        if let v = tags.title { track.title = v }
+        if let v = tags.artist { track.artist = v }
+        if let v = tags.albumArtist { track.albumArtist = v }
+        if let v = tags.album { track.album = v }
+        if let v = tags.genre { track.genre = v }
+        if let v = tags.composer { track.composer = v }
+        if let v = tags.comment { track.comment = v }
+        if let v = tags.lyrics {
+            track.lyrics = v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : v
+        }
+        if let v = tags.year { track.year = v > 0 ? v : nil }
+        if let v = tags.trackNumber { track.trackNumber = v > 0 ? v : nil }
+        if let v = tags.trackTotal { track.trackTotal = v > 0 ? v : nil }
+        if let v = tags.discNumber { track.discNumber = v > 0 ? v : nil }
+    }
+
+    /// Re-applies the user's edits on top of metadata just read from disk.
+    private func applyOverrides(to track: inout Track) {
+        let key = Self.tagOverrideKey(for: track)
+        if let tags = tagOverrides[key] {
+            Self.apply(tags, to: &track)
+        }
+        if let art = artworkOverrides[key] {
+            if art.isEmpty {
+                track.artworkKey = nil
+            } else if ArtworkStore.shared.exists(key: art) {
+                track.artworkKey = art
+            } else {
+                // iOS purged the cached cover; fall back to what the file has.
+                artworkOverrides[key] = nil
+                saveOverrides()
+            }
+        }
+    }
+
+    /// Edits tags for one or more tracks: updates the library immediately,
+    /// remembers the edit so it survives rescans, and — when asked and the
+    /// format allows — writes the tags into the music files off the main thread.
+    func applyTagEdit(trackIDs: [UUID],
+                      tags: TagSet,
+                      artwork: ArtworkChange,
+                      writeToFiles: Bool) async -> TagEditResult {
+        var result = TagEditResult(written: 0, libraryOnly: 0, failures: [])
+
+        var seen = Set<UUID>()
+        let ids = trackIDs.filter { seen.insert($0).inserted }
+        guard !ids.isEmpty, !tags.isEmpty || artwork != .keep else { return result }
+
+        // 1. Cover: stored under a fresh key so every view keyed on
+        //    `artworkKey` reloads (a reused key would show the cached image).
+        var artworkChange = artwork
+        var newArtworkKey: String?
+        if case .replace(let data) = artwork {
+            let storeKey = "tag-edit|\(UUID().uuidString)"
+            newArtworkKey = await Task.detached(priority: .userInitiated) { () -> String? in
+                ArtworkStore.shared.store(data, forAlbumKey: storeKey)
+            }.value
+            if newArtworkKey == nil {
+                result.failures.append(("Cover", "The picture couldn't be read, so the cover was left as it was."))
+                artworkChange = .keep
+            }
+        }
+
+        // 2. Library. One assignment to `tracks` so observers redraw once.
+        let now = Date()
+        var updated = tracks
+        var edited: [Track] = []
+        for id in ids {
+            guard let idx = liveIndex(of: id), updated.indices.contains(idx) else { continue }
+            var t = updated[idx]
+            let key = Self.tagOverrideKey(for: t)
+            if !tags.isEmpty {
+                Self.apply(tags, to: &t)
+                tagOverrides[key] = (tagOverrides[key] ?? TagSet()).merged(with: tags)
+            }
+            switch artworkChange {
+            case .keep:
+                break
+            case .replace:
+                if let newKey = newArtworkKey {
+                    t.artworkKey = newKey
+                    artworkOverrides[key] = newKey
+                }
+            case .remove:
+                t.artworkKey = nil
+                artworkOverrides[key] = ""
+            }
+            t.dateModified = now
+            updated[idx] = t
+            edited.append(t)
+        }
+        guard !edited.isEmpty else { return result }
+        tracks = updated
+        rebuildIndex()
+        saveOverrides()
+        save()
+        let editedIDs = Set(edited.map(\.id))
+        refreshPlayerIfNeeded(editedIDs)
+
+        // 3. Files.
+        var jobs: [TagWriteJob] = []
+        for t in edited {
+            guard writeToFiles, Self.canWriteTags(to: t) else {
+                result.libraryOnly += 1
+                continue
+            }
+            guard let fileURL = self.url(for: t) else {
+                result.failures.append((t.fileName,
+                                        "Sonora can't reach this file right now. The changes are saved in Sonora's library."))
+                continue
+            }
+            let key = Self.tagOverrideKey(for: t)
+            // Write the whole pending edit, including fields from an earlier
+            // edit whose write failed, so dropping the override afterwards
+            // loses nothing.
+            jobs.append(TagWriteJob(trackID: t.id,
+                                    key: key,
+                                    name: t.fileName,
+                                    url: fileURL,
+                                    tags: tagOverrides[key] ?? tags))
+        }
+        guard !jobs.isEmpty else { return result }
+
+        let jobsToRun = jobs
+        let change = artworkChange
+        let outcomes: [String?] = await Task.detached(priority: .userInitiated) { () -> [String?] in
+            var out: [String?] = []
+            out.reserveCapacity(jobsToRun.count)
+            for job in jobsToRun {
+                // Root folders keep their scope open for the whole launch;
+                // this covers files whose own URL carries the scope.
+                let scoped = job.url.startAccessingSecurityScopedResource()
+                do {
+                    try await TagWriter.write(job.tags, artwork: change, to: job.url)
+                    out.append(nil)
+                } catch {
+                    out.append(error.localizedDescription)
+                }
+                if scoped { job.url.stopAccessingSecurityScopedResource() }
+            }
+            return out
+        }.value
+
+        for (i, job) in jobsToRun.enumerated() {
+            let failure: String? = outcomes.indices.contains(i) ? outcomes[i] : "The write didn't finish."
+            if let failure {
+                result.failures.append((job.name, failure + " The changes are saved in Sonora's library."))
+                continue
+            }
+            result.written += 1
+            // The file now carries the truth.
+            tagOverrides[job.key] = nil
+            if let idx = liveIndex(of: job.trackID) {
+                switch change {
+                case .keep: break
+                case .replace: tracks[idx].hasEmbeddedArtwork = true
+                case .remove: tracks[idx].hasEmbeddedArtwork = false
+                }
+            }
+        }
+        saveOverrides()
+        save()
+        refreshPlayerIfNeeded(editedIDs)
+        return result
+    }
+
+    private func refreshPlayerIfNeeded(_ ids: Set<UUID>) {
+        guard let player = AppServices.player,
+              let currentID = player.currentTrack?.id,
+              ids.contains(currentID) else { return }
+        player.refreshCurrentTrackFromLibrary()
     }
 
     // MARK: - Playlists
@@ -548,6 +768,35 @@ final class MediaLibrary: ObservableObject {
 
     private static let saveQueue = DispatchQueue(label: "sonora.library.save", qos: .utility)
 
+    // MARK: Tag override persistence
+
+    /// Kept apart from the library snapshot so its format can never stop an
+    /// existing library from decoding.
+    private struct OverrideSnapshot: Codable {
+        var tags: [String: TagSet]
+        var artwork: [String: String]
+    }
+
+    private var overridesStoreURL: URL {
+        storeURL.deletingLastPathComponent().appendingPathComponent("SonoraTagOverrides.json")
+    }
+
+    private func loadOverrides() {
+        guard let data = try? Data(contentsOf: overridesStoreURL),
+              let snapshot = try? JSONDecoder().decode(OverrideSnapshot.self, from: data) else { return }
+        tagOverrides = snapshot.tags
+        artworkOverrides = snapshot.artwork
+    }
+
+    private func saveOverrides() {
+        let snapshot = OverrideSnapshot(tags: tagOverrides, artwork: artworkOverrides)
+        let url = overridesStoreURL
+        Self.saveQueue.async {
+            guard let data = try? JSONEncoder().encode(snapshot) else { return }
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
     private func scheduleSave() {
         saveWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in self?.save() }
@@ -565,12 +814,38 @@ final class MediaLibrary: ObservableObject {
         FolderAccessManager.shared.releaseAll()
         roots.removeAll(); tracks.removeAll(); playlists.removeAll(); recentlyPlayedIDs.removeAll()
         trackIndex.removeAll()
+        tagOverrides.removeAll(); artworkOverrides.removeAll()
         ArtworkStore.shared.clear()
         Task { await WaveformAnalyzer.shared.clearCache() }
         // Queued behind any save already in flight, so none can land after it.
         let url = storeURL
+        let overridesURL = overridesStoreURL
         Self.saveQueue.async {
             try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: overridesURL)
         }
     }
+}
+
+// MARK: - Tag edit results
+
+/// What `MediaLibrary.applyTagEdit` did.
+struct TagEditResult {
+    /// Files whose tags were rewritten on disk.
+    var written: Int
+    /// Tracks edited in Sonora's library only (format can't be written, cue
+    /// track, or "Save into the music file" was off).
+    var libraryOnly: Int
+    /// (file name, message) for every write that failed. Those edits are
+    /// still kept in the library.
+    var failures: [(String, String)]
+}
+
+/// One file write, handed to a background task.
+private struct TagWriteJob {
+    let trackID: UUID
+    let key: String
+    let name: String
+    let url: URL
+    let tags: TagSet
 }

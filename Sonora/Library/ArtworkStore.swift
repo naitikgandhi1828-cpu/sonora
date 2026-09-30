@@ -122,6 +122,14 @@ final class ArtworkStore {
         return thumb
     }
 
+    /// True when the full-size image for a stored key is still on disk.
+    /// The cache lives in Caches, which iOS may purge under storage pressure.
+    func exists(key: String) -> Bool {
+        guard !key.isEmpty else { return false }
+        let url = directory.appendingPathComponent("\(key).jpg")
+        return FileManager.default.fileExists(atPath: url.path)
+    }
+
     func hasArtwork(forAlbumKey albumKey: String) -> String? {
         let key = Self.hash(albumKey)
         let url = directory.appendingPathComponent("\(key).jpg")

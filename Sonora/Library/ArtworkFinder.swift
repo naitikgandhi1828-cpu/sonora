@@ -56,6 +56,8 @@ final class ArtworkFinder: ObservableObject {
     /// album has been tried before, or when a sweep is already running.
     func findIfMissing(for track: Track) {
         guard !isRunning, track.artworkKey == nil else { return }
+        // The user removed this cover in the tag editor; don't bring it back.
+        guard !library.hasArtworkOverride(track) else { return }
         let key = track.albumKey
         guard !attempted.contains(key) else { return }
         attempted.insert(key)
@@ -83,7 +85,7 @@ final class ArtworkFinder: ObservableObject {
         // One representative track per album without art. Albums are the unit
         // of work because artwork is stored per album key.
         var byAlbum: [String: Track] = [:]
-        for track in library.tracks where track.artworkKey == nil {
+        for track in library.tracks where track.artworkKey == nil && !library.hasArtworkOverride(track) {
             if byAlbum[track.albumKey] == nil { byAlbum[track.albumKey] = track }
         }
         let jobs = Array(byAlbum.values)

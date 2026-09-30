@@ -91,6 +91,10 @@ enum MetadataReader {
             case "genre":       track.genre = string ?? track.genre
             case "composer":    track.composer = string ?? track.composer
             case "comment":     track.comment = string ?? track.comment
+            case "lyrics":
+                if let s = string, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    track.lyrics = s
+                }
             case "year", "creationdate", "date", "recordingdate":
                 if let s = string { track.year = parseYear(s) }
             case "tracknumber":
@@ -188,10 +192,19 @@ enum MetadataReader {
         case "tyer", "tdrc", "©day": key = "year"
         case "comm", "©cmt": key = "comment"
         case "apic", "covr": key = "artwork"
+        case "uslt", "©lyr": key = "lyrics"
         default: break
+        }
+        // Lyrics: iTunes atoms often carry their key as a numeric four-char
+        // code rather than a string, so match on the identifier as well.
+        if let identifier = item.identifier,
+           identifier == .id3MetadataUnsynchronizedLyric || identifier == .iTunesMetadataLyrics {
+            return "lyrics"
         }
         // Vorbis / free-form identifiers arrive with prefixes.
         if let id = item.identifier?.rawValue.lowercased() {
+            // "itsk/%A9lyr", "udta/%A9lyr", Vorbis "LYRICS" / "UNSYNCEDLYRICS".
+            if id.contains("%a9lyr") || id.hasSuffix("/uslt") || id.hasSuffix("lyrics") { return "lyrics" }
             if id.contains("replaygain_track_gain") { return "replaygain_track_gain" }
             if id.contains("replaygain_album_gain") { return "replaygain_album_gain" }
             if id.contains("replaygain_track_peak") { return "replaygain_track_peak" }

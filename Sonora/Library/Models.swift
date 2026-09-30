@@ -47,6 +47,10 @@ struct Track: Identifiable, Codable, Hashable {
     var trackTotal: Int?
     var discNumber: Int?
     var comment: String = ""
+    /// Unsynchronised lyrics. Optional on purpose: `Track` uses synthesized
+    /// Codable, and libraries saved before this field existed must still
+    /// decode (a missing key decodes as `nil` only for Optionals).
+    var lyrics: String?
 
     // Technical
     var duration: TimeInterval = 0
