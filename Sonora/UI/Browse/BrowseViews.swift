@@ -207,20 +207,31 @@ struct AlbumDetailView: View {
     @EnvironmentObject private var player: PlaybackController
     @EnvironmentObject private var themes: ThemeManager
 
+    @State private var editTarget: TagEditTarget?
+
     private var tracks: [Track] {
         library.tracks(ids: album.trackIDs)
             .sorted(by: TrackSort.trackNumber.comparator(ascending: true))
+    }
+
+    // The header reads the live tracks, so an album tag edit shows at once
+    // (`album` is a snapshot taken when this screen was pushed).
+    private var headerTitle: String { tracks.first?.displayAlbum ?? album.title }
+    private var headerArtist: String { tracks.first?.effectiveAlbumArtist ?? album.artist }
+    private var headerYear: Int? { tracks.isEmpty ? album.year : tracks.lazy.compactMap(\.year).first }
+    private var headerArtworkKey: String? {
+        tracks.isEmpty ? album.artworkKey : tracks.lazy.compactMap(\.artworkKey).first
     }
 
     var body: some View {
         List {
             Section {
                 VStack(spacing: 12) {
-                    ArtworkView(key: album.artworkKey, size: 200, cornerRadius: 14, useThumbnail: false)
+                    ArtworkView(key: headerArtworkKey, size: 200, cornerRadius: 14, useThumbnail: false)
                     VStack(spacing: 3) {
-                        Text(album.title).font(.system(size: 19, weight: .bold)).multilineTextAlignment(.center)
-                        Text(album.artist).font(.system(size: 14)).foregroundStyle(themes.theme.textSecondary)
-                        Text([album.year.map(String.init), "\(album.trackIDs.count) tracks", album.totalDuration.longFormat]
+                        Text(headerTitle).font(.system(size: 19, weight: .bold)).multilineTextAlignment(.center)
+                        Text(headerArtist).font(.system(size: 14)).foregroundStyle(themes.theme.textSecondary)
+                        Text([headerYear.map(String.init), "\(album.trackIDs.count) tracks", album.totalDuration.longFormat]
                             .compactMap { $0 }.joined(separator: " · "))
                             .font(.system(size: 11))
                             .foregroundStyle(themes.theme.textSecondary)
@@ -269,8 +280,23 @@ struct AlbumDetailView: View {
             }
         }
         .listStyle(.plain)
-        .navigationTitle(album.title)
+        .navigationTitle(headerTitle)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button {
+                        let ids = tracks.map(\.id)
+                        if !ids.isEmpty { editTarget = TagEditTarget(trackIDs: ids) }
+                    } label: { Label("Edit Album Tags…", systemImage: "tag") }
+                        .disabled(tracks.isEmpty)
+                } label: { Image(systemName: "ellipsis.circle") }
+                .tint(themes.accent)
+            }
+        }
+        .sheet(item: $editTarget) { target in
+            TagEditorView(trackIDs: target.trackIDs)
+        }
     }
 }
 
@@ -567,6 +593,7 @@ private struct TrackContextMenu: ViewModifier {
     @EnvironmentObject private var library: MediaLibrary
     @EnvironmentObject private var player: PlaybackController
     @State private var showInfo = false
+    @State private var editTarget: TagEditTarget?
 
     func body(content: Content) -> some View {
         content
@@ -592,9 +619,15 @@ private struct TrackContextMenu: ViewModifier {
                 }
                 Divider()
                 Button { showInfo = true } label: { Label("Track Info", systemImage: "info.circle") }
+                Button {
+                    editTarget = TagEditTarget(trackIDs: [track.id])
+                } label: { Label("Edit Tags…", systemImage: "tag") }
             }
             .sheet(isPresented: $showInfo) {
                 TrackInfoView(track: track).presentationDetents([.medium, .large])
+            }
+            .sheet(item: $editTarget) { target in
+                TagEditorView(trackIDs: target.trackIDs)
             }
     }
 }
