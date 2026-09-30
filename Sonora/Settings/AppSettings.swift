@@ -211,6 +211,8 @@ final class AppSettings: ObservableObject {
     @Published var studioWidth: Double { didSet { save(studioWidth, "stWidth") } }           // 0...1
     /// Ducks the reverb under vocals (Studio and Classic engines). 0...1.
     @Published var reverbClarity: Double { didSet { save(reverbClarity, "revClarity") } }
+    /// How far into the room the singer stands (Studio engine). 0...1.
+    @Published var studioPresence: Double { didSet { save(studioPresence, "stPresence") } }
     /// Holds the current tail indefinitely. Deliberately not persisted.
     @Published var studioFreeze: Bool = false
 
@@ -380,6 +382,7 @@ final class AppSettings: ObservableObject {
         studioEarly = n("stEarly", studioDefault.early)
         studioWidth = n("stWidth", studioDefault.width)
         reverbClarity = min(1, max(0, n("revClarity", 0.6)))
+        studioPresence = min(1, max(0, n("stPresence", studioDefault.presence)))
 
         spatialEnabled = b("spOn", false)
         spatialAmount = n("spAmt", 60)
@@ -577,6 +580,28 @@ final class AppSettings: ObservableObject {
 
         var id: String { name }
 
+        /// How far into the room the singer stands for this preset: small
+        /// dead rooms keep the voice close, big live spaces place it deep
+        /// inside the room.
+        var presence: Double {
+            switch name {
+            case "Vocal Booth": return 0.3
+            case "Drum Room": return 0.45
+            case "Small Room": return 0.55
+            case "Ambience": return 0.5
+            case "Chamber": return 0.75
+            case "Vocal Plate": return 0.5
+            case "Bright Plate": return 0.5
+            case "Concert Hall": return 0.7
+            case "Warm Hall": return 0.7
+            case "Arena": return 0.65
+            case "Cathedral": return 0.85
+            case "Dark Space": return 0.75
+            case "Infinite": return 0.6
+            default: return 0.6
+            }
+        }
+
         static let booth = StudioReverbPreset(name: "Vocal Booth", symbol: "mic",
             decay: 0.45, size: 0.15, preDelayMS: 0, bassDecay: 1.0, trebleDecay: 0.6,
             lowCut: 120, highCut: 10_000, diffusion: 0.6, modulation: 0.1,
@@ -649,6 +674,7 @@ final class AppSettings: ObservableObject {
         studioEarly = p.early
         studioWidth = p.width
         studioMix = p.mix
+        studioPresence = p.presence
         studioPresetName = p.name
     }
 
