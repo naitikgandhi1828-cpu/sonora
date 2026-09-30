@@ -39,7 +39,16 @@ struct StudioReverbView: View {
                 LabeledSlider(title: "Vocal clarity", value: $settings.reverbClarity, range: 0...1,
                               format: { String(format: "%.0f%%", $0 * 100) },
                               onReset: { settings.reverbClarity = 0.6 })
-                Text("Turns the reverb down while someone is singing, so lyrics stay clear.")
+                Text("Lowers the long reverb tail while someone is singing, so lyrics stay clear.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(themes.theme.textSecondary)
+                LabeledSlider(title: "Singer in the room", value: bind(\.studioPresence), range: 0...1,
+                              format: { v in
+                                  v < 0.34 ? "Close" : (v < 0.67 ? String(format: "%.0f%%", v * 100)
+                                                                 : "Deep")
+                              },
+                              onReset: { reset(\.studioPresence, to: Self.defaults.presence) })
+                Text("Wraps the voice in the room's first reflections, so it sounds like it's being sung inside the space — without blurring the words.")
                     .font(.system(size: 11))
                     .foregroundStyle(themes.theme.textSecondary)
                 LabeledSlider(title: "Mix", value: bind(\.studioMix), range: 0...1,
