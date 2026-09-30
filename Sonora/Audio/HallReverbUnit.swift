@@ -56,7 +56,8 @@ enum HallParam: AUParameterAddress {
     case early        = 10  // 0...1 — early-reflection level
     case width        = 11  // 0...1 — stereo width of the wet signal
     case freeze       = 12  // 0/1 — infinite sustain, no new input
-    case clarity      = 13  // 0...1 — ducks the reverb while vocals are present
+    case clarity      = 13  // 0...1 — ducks the late tail while vocals are present
+    case presence     = 14  // 0...1 — how far into the room the singer stands
 }
 
 // MARK: - Render state
@@ -93,6 +94,10 @@ private struct HallState {
     var tapGainL: UnsafeMutablePointer<Float>
     var tapGainR: UnsafeMutablePointer<Float>
     var earlyGain: Float = 0.4
+    /// Early-reflection input filters (the ER path is fed from the direct
+    /// signal, not the pre-delayed tail send, so it needs its own state).
+    var erLpL: Float = 0, erLpR: Float = 0
+    var erHpL: Float = 0, erHpR: Float = 0
 
     // Pre-delay rings.
     var preL: UnsafeMutablePointer<Float>
@@ -148,6 +153,7 @@ private struct HallState {
     var width: Float = 1
     var freeze: Float = 0
     var clarity: Float = 0.6
+    var presence: Float = 0.6
     /// Output trim that keeps dry + wet from pushing the limiter into distortion.
     var headroom: Float = 1
 
@@ -363,7 +369,8 @@ public final class HallReverbUnit: AUAudioUnit {
             p(.early,       "early",      "Early",        0,    1,     0.4,  .generic),
             p(.width,       "width",      "Width",        0,    1,     1,    .generic),
             p(.freeze,      "freeze",     "Freeze",       0,    1,     0,    .boolean),
-            p(.clarity,     "clarity",    "Vocal Clarity", 0,   1,     0.6,  .generic)
+            p(.clarity,     "clarity",    "Vocal Clarity", 0,   1,     0.6,  .generic),
+            p(.presence,    "presence",   "Singer in Room", 0,  1,     0.6,  .generic)
         ]
 
         let tree = AUParameterTree.createTree(withChildren: params)
@@ -402,6 +409,7 @@ public final class HallReverbUnit: AUAudioUnit {
         case .width:       st.pointee.width = max(0, min(1, v))
         case .freeze:      st.pointee.freeze = v > 0.5 ? 1 : 0
         case .clarity:     st.pointee.clarity = max(0, min(1, v.isFinite ? v : 0))
+        case .presence:    st.pointee.presence = max(0, min(1, v.isFinite ? v : 0))
         case .none:        break
         }
     }
@@ -429,6 +437,7 @@ public final class HallReverbUnit: AUAudioUnit {
         case .width:       return st.pointee.width
         case .freeze:      return st.pointee.freeze
         case .clarity:     return st.pointee.clarity
+        case .presence:    return st.pointee.presence
         case .none:        return 0
         }
     }
@@ -480,7 +489,14 @@ public final class HallReverbUnit: AUAudioUnit {
             st.pointee.tapGainL[k] = tapGains[k]
             st.pointee.tapGainR[k] = tapGains[(k + 1) % hallTapCount] * -1
         }
-        st.pointee.earlyGain = frozen ? 0 : s.early * 0.45
+        // Early reflections are what put the *voice* in the room: they land
+        // within ~5–80 ms, so the ear fuses them with the singer instead of
+        // hearing them as echo — the words stay sharp, but they gain size,
+        // depth and a position in the space. Their level is set here on its
+        // own (not through the tail's wet gain or ducking), rising with
+        // "Singer in room". Scaled by mix so 0% mix is still fully dry.
+        let erLevel = s.early * (0.12 + 0.30 * s.presence)
+        st.pointee.earlyGain = frozen ? 0 : erLevel * min(1, s.mix * 3)
 
         // Pre-delay.
         st.pointee.preDelay = max(1, min(s.preCap - 2, Int(s.preDelayMS * 0.001 * sr)))
@@ -504,14 +520,18 @@ public final class HallReverbUnit: AUAudioUnit {
         st.pointee.scLPCoef = 1 - expf(-2 * .pi * min(4_000, sr * 0.45) / sr)
         st.pointee.scAttack = 1 - expf(-1 / (0.008 * sr))
         st.pointee.scRelease = 1 - expf(-1 / (0.32 * sr))
-        st.pointee.duckDepth = frozen ? 0 : s.clarity * 9
+        // Clarity only ducks the late tail. The further the singer stands
+        // into the room, the more of that tail we let bloom around them.
+        st.pointee.duckDepth = frozen ? 0 : s.clarity * 9 * (1 - 0.5 * s.presence)
 
         // Mix. The dry signal stays at full level up to 50% so the song never
         // loses detail under the reverb; past that it fades out smoothly.
         st.pointee.inputGain = frozen ? 0 : 1
         let wet = sqrtf(max(0, s.mix)) * 0.9
         st.pointee.wetGain = wet
-        st.pointee.dryGain = min(1, sqrtf(max(0, 2 * (1 - s.mix))))
+        // Standing further into the room means slightly less direct sound
+        // relative to the room (up to −2.5 dB) — the main distance cue.
+        st.pointee.dryGain = min(1, sqrtf(max(0, 2 * (1 - s.mix)))) * (1 - 0.25 * s.presence)
         // A little headroom proportional to the reverb level, so the extra
         // energy doesn't drive the limiter into audible distortion.
         st.pointee.headroom = 1 / (1 + 0.35 * wet)
@@ -533,6 +553,8 @@ public final class HallReverbUnit: AUAudioUnit {
         st.pointee.hpL = 0; st.pointee.hpR = 0
         st.pointee.lfoSin = 0; st.pointee.lfoCos = 1
         st.pointee.scHP = 0; st.pointee.scLP = 0; st.pointee.scEnv = 0
+        st.pointee.erLpL = 0; st.pointee.erLpR = 0
+        st.pointee.erHpL = 0; st.pointee.erHpR = 0
     }
 
     // MARK: Resources
@@ -644,6 +666,8 @@ public final class HallReverbUnit: AUAudioUnit {
             var lpL = s.lpL, lpR = s.lpR
             var hpL = s.hpL, hpR = s.hpR
             var lfoS = s.lfoSin, lfoC = s.lfoCos
+            var erLpL = s.erLpL, erLpR = s.erLpR
+            var erHpL = s.erHpL, erHpR = s.erHpR
             // Never let a bad value reach the Int() conversions below.
             if !(lfoS.isFinite && lfoC.isFinite) { lfoS = 0; lfoC = 1 }
 
@@ -679,8 +703,18 @@ public final class HallReverbUnit: AUAudioUnit {
                 wR = (lpR - hpR) * inputGain
 
                 // --- Early reflections ------------------------------------
-                erL[erWrite] = wL
-                erR[erWrite] = wR
+                // Fed from the direct sound (no pre-delay), with a little of
+                // each side crossed into the other, so a centred voice lands
+                // on two different reflection patterns — that's what spreads
+                // it around the listener instead of leaving it in the middle.
+                let eInL = (xL * 0.8 + xR * 0.2) * inputGain
+                let eInR = (xR * 0.8 + xL * 0.2) * inputGain
+                erLpL += (eInL - erLpL) * lpCoef
+                erLpR += (eInR - erLpR) * lpCoef
+                erHpL += (erLpL - erHpL) * hpCoef
+                erHpR += (erLpR - erHpR) * hpCoef
+                erL[erWrite] = erLpL - erHpL
+                erR[erWrite] = erLpR - erHpR
                 var eL: Float = 0
                 var eR: Float = 0
                 var t = 0
@@ -801,13 +835,19 @@ public final class HallReverbUnit: AUAudioUnit {
                 lineWrite += 1
                 if lineWrite >= lineCap { lineWrite = 0 }
 
-                // --- Wet: tank + early reflections, then width -----------
-                let wetL = tankL + eL * earlyGain
-                let wetR = tankR + eR * earlyGain
-                let mid = (wetL + wetR) * 0.5
-                let sideSig = (wetL - wetR) * 0.5 * side
+                // --- Late tail, then width ---------------------------------
+                let mid = (tankL + tankR) * 0.5
+                let sideSig = (tankL - tankR) * 0.5 * side
                 let outWL = mid + sideSig
                 let outWR = mid - sideSig
+
+                // Early reflections keep at least 80% width so the voice
+                // always gets its space, even when the tail is narrowed.
+                let erSide: Float = side > 0.8 ? side : 0.8
+                let erMid = (eL + eR) * 0.5
+                let erS = (eL - eR) * 0.5 * erSide
+                let erOutL = (erMid + erS) * earlyGain
+                let erOutR = (erMid - erS) * earlyGain
 
                 // Vocal-clarity sidechain on the dry mid signal.
                 let midIn = (xL + xR) * 0.5
@@ -818,8 +858,10 @@ public final class HallReverbUnit: AUAudioUnit {
                 let duck = 1 / (1 + duckDepth * scEnv)
 
                 let wg = wetGain * duck
-                let yL = (xL * dryGain + outWL * wg) * headroom
-                let yR = (xR * dryGain + outWR * wg) * headroom
+                // Clarity ducks only the tail; the early reflections that
+                // place the voice in the room are never ducked.
+                let yL = (xL * dryGain + outWL * wg + erOutL) * headroom
+                let yR = (xR * dryGain + outWR * wg + erOutR) * headroom
                 outL[n] = yL
                 if outR != outL { outR[n] = yR }
                 n += 1
@@ -845,6 +887,10 @@ public final class HallReverbUnit: AUAudioUnit {
             st.pointee.scHP = scHP.isFinite ? scHP : 0
             st.pointee.scLP = scLP.isFinite ? scLP : 0
             st.pointee.scEnv = scEnv.isFinite ? scEnv : 0
+            st.pointee.erLpL = erLpL.isFinite ? erLpL : 0
+            st.pointee.erLpR = erLpR.isFinite ? erLpR : 0
+            st.pointee.erHpL = erHpL.isFinite ? erHpL : 0
+            st.pointee.erHpR = erHpR.isFinite ? erHpR : 0
             return noErr
         }
     }
