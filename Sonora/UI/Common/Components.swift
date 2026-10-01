@@ -237,7 +237,7 @@ struct EmptyStateView: View {
                         .font(.system(size: 15, weight: .semibold))
                         .padding(.horizontal, 22).padding(.vertical, 11)
                         .background(themes.accent, in: Capsule())
-                        .foregroundStyle(.white)
+                        .foregroundStyle(themes.accent.isLight ? Color.black : Color.white)
                 }
                 .padding(.top, 4)
             }
@@ -304,7 +304,8 @@ struct Chip: View {
                 .padding(.horizontal, 13).padding(.vertical, 7)
                 .background(isSelected ? themes.accent : themes.theme.surfaceElevated,
                             in: Capsule())
-                .foregroundStyle(isSelected ? .white : themes.theme.textPrimary)
+                .foregroundStyle(isSelected ? (themes.accent.isLight ? Color.black : Color.white)
+                                            : themes.theme.textPrimary)
         }
         .buttonStyle(.plain)
     }

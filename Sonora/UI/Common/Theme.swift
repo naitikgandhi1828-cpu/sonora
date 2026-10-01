@@ -219,9 +219,18 @@ struct Theme: Identifiable, Hashable {
 final class ThemeManager: ObservableObject {
     @Published private(set) var theme: Theme
     /// Accent pulled from the current album art when the user enables it.
-    @Published var artworkAccent: Color?
+    /// Only the player screens use it (through `playerAccent`); the rest of
+    /// the app keeps the theme's own accent so picking a theme or a custom
+    /// colour is never overridden by whatever song happens to be playing.
+    @Published private(set) var artworkAccent: Color?
+    /// Two or three soft colours taken from the cover, for the ambient
+    /// background. Falls back to the theme's accents when there is no art.
+    @Published private(set) var artworkPalette: [Color] = []
 
     private let settings: AppSettings
+    /// The cover the tint was last computed from, so a theme change (light vs
+    /// dark use different brightness rules) can recompute it straight away.
+    private weak var lastArtwork: UIImage?
 
     init(settings: AppSettings) {
         self.settings = settings
@@ -234,6 +243,7 @@ final class ThemeManager: ObservableObject {
     func select(_ theme: Theme) {
         settings.themeID = theme.id
         self.theme = Self.resolve(themeID: theme.id, accentHex: settings.customAccentHex)
+        recomputeArtworkColours()
     }
 
     /// Custom accent colour, or nil for the theme's own.
@@ -252,28 +262,91 @@ final class ThemeManager: ObservableObject {
         return base.withAccent(custom)
     }
 
-    var accent: Color {
+    /// The app-wide highlight colour: the theme's accent, or the custom one.
+    var accent: Color { theme.accent }
+
+    /// Highlight colour for the Now Playing screen and the mini player:
+    /// the album-art tint while "Tint from album art" is on, else `accent`.
+    var playerAccent: Color {
         if settings.useAlbumArtColors, let artworkAccent { return artworkAccent }
         return theme.accent
     }
 
+    /// Colours for the ambient background (always at least two).
+    var ambientColours: [Color] {
+        switch artworkPalette.count {
+        case 0: return [playerAccent, theme.accentSecondary, theme.accent]
+        case 1: return [artworkPalette[0], playerAccent, theme.accentSecondary]
+        default: return artworkPalette
+        }
+    }
+
     func updateArtworkAccent(from image: UIImage?) {
-        guard settings.useAlbumArtColors, let image, let average = image.averageColor else {
+        lastArtwork = image
+        recomputeArtworkColours(image)
+    }
+
+    private func recomputeArtworkColours(_ explicit: UIImage? = nil) {
+        let image = explicit ?? lastArtwork
+        guard let image else {
+            if artworkAccent != nil { artworkAccent = nil }
+            if !artworkPalette.isEmpty { artworkPalette = [] }
+            return
+        }
+        // Palette is cheap (a 2x2 redraw) and is wanted even with the tint
+        // switched off, because the ambient background uses it.
+        artworkPalette = image.quadrantColours.map { Color(readable($0)) }
+
+        guard settings.useAlbumArtColors, let average = image.averageColor else {
             artworkAccent = nil
             return
         }
-        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        average.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
-        // Push toward something readable on the current background.
-        let boosted = UIColor(hue: h,
-                              saturation: min(1, max(0.45, s * 1.5)),
-                              brightness: theme.isDark ? min(1, max(0.62, b * 1.35))
-                                                       : min(0.7, max(0.35, b * 0.8)),
-                              alpha: 1)
-        artworkAccent = Color(boosted)
+        artworkAccent = Color(readable(average))
     }
 
+    /// Push a colour toward something readable on the current background:
+    /// brighter on dark themes, deeper on light ones (so white text and icons
+    /// on top of it still read).
+    private func readable(_ colour: UIColor) -> UIColor {
+        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        colour.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+        return UIColor(hue: h,
+                       saturation: min(1, max(0.45, s * 1.5)),
+                       brightness: theme.isDark ? min(1, max(0.62, b * 1.35))
+                                                : min(0.7, max(0.35, b * 0.8)),
+                       alpha: 1)
+    }
+
+    /// Called when "Tint from album art" is switched on or off.
+    func refreshArtworkTint() { recomputeArtworkColours() }
+
     var colorScheme: ColorScheme { theme.isDark ? .dark : .light }
+}
+
+private extension UIImage {
+    /// Average colour of each quarter of the image (top-left, top-right,
+    /// bottom-left, bottom-right), with near-duplicates dropped.
+    var quadrantColours: [UIColor] {
+        guard let cg = cgImage else { return [] }
+        let side = 2
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        guard let ctx = CGContext(data: &pixels, width: side, height: side,
+                                  bitsPerComponent: 8, bytesPerRow: side * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return [] }
+        ctx.interpolationQuality = .medium
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: side, height: side))
+        var result: [UIColor] = []
+        var seen: [(Double, Double, Double)] = []
+        for i in stride(from: 0, to: pixels.count, by: 4) {
+            let r = Double(pixels[i]) / 255, g = Double(pixels[i + 1]) / 255, b = Double(pixels[i + 2]) / 255
+            let close = seen.contains { abs($0.0 - r) + abs($0.1 - g) + abs($0.2 - b) < 0.12 }
+            if close { continue }
+            seen.append((r, g, b))
+            result.append(UIColor(red: r, green: g, blue: b, alpha: 1))
+        }
+        return Array(result.prefix(3))
+    }
 }
 
 // MARK: - Convenience
@@ -291,6 +364,13 @@ extension Color {
                      opacity: 1)
     }
 
+    /// True for pale colours, where a black icon reads better than white.
+    var isLight: Bool {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        UIColor(self).getRed(&r, green: &g, blue: &b, alpha: &a)
+        return 0.299 * r + 0.587 * g + 0.114 * b > 0.72
+    }
+
     var hexString: String {
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         UIColor(self).getRed(&r, green: &g, blue: &b, alpha: &a)
@@ -300,6 +380,57 @@ extension Color {
 }
 
 extension View {
+    /// Lists and Forms: show the theme's background instead of the system's
+    /// plain grey/white. Pair with `themedRow` on each Section or row.
+    func themedList(_ theme: Theme) -> some View {
+        self
+            .scrollContentBackground(.hidden)
+            .background(theme.background.ignoresSafeArea())
+    }
+
+    /// Row/cell colour for a List or Form. Apply to a Section, ForEach or row.
+    func themedRow(_ theme: Theme) -> some View {
+        self
+            .listRowBackground(theme.surface)
+            .listRowSeparatorTint(theme.separator)
+    }
+
+    /// Rows of a `.plain` list: they sit straight on the theme background,
+    /// like the rest of the screen, instead of on white/black cells.
+    func themedPlainRow(_ theme: Theme) -> some View {
+        self
+            .listRowBackground(Color.clear)
+            .listRowSeparatorTint(theme.separator)
+    }
+
+    /// Navigation bar in the theme's colours. Apply inside a NavigationStack.
+    func themedNavBar(_ theme: Theme) -> some View {
+        self
+            .toolbarBackground(theme.background, for: .navigationBar)
+            .toolbarColorScheme(theme.isDark ? .dark : .light, for: .navigationBar)
+    }
+
+    /// Anything shown as a sheet or full-screen cover. Presentations do not
+    /// reliably inherit the colour scheme and tint from the screen behind
+    /// them, which is why light themes used to show dark sheets and the
+    /// other way round.
+    @MainActor
+    func themedSheet(_ themes: ThemeManager) -> some View {
+        self
+            .preferredColorScheme(themes.colorScheme)
+            .tint(themes.accent)
+            .fontDesign(AppSettings.shared.fontStyle.design)
+            .presentationBackground(themes.theme.background)
+    }
+
+    /// Tab bar in the theme's surface colour. Apply to each tab's content.
+    func themedTabBar(_ theme: Theme) -> some View {
+        self
+            .toolbarBackground(theme.surface, for: .tabBar)
+            .toolbarBackground(.visible, for: .tabBar)
+            .toolbarColorScheme(theme.isDark ? .dark : .light, for: .tabBar)
+    }
+
     func cardBackground(_ theme: Theme, radius: CGFloat = 14) -> some View {
         background(
             RoundedRectangle(cornerRadius: radius, style: .continuous)
