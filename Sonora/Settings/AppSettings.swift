@@ -259,6 +259,10 @@ final class AppSettings: ObservableObject {
     @Published var showVisualizer: Bool { didSet { save(showVisualizer, "visualizer") } }
     @Published var blurredArtBackground: Bool { didSet { save(blurredArtBackground, "blurBG") } }
     @Published var keepScreenAwake: Bool { didSet { save(keepScreenAwake, "awake") } }
+    /// "#RRGGBB" accent chosen by the user; empty means use the theme's own.
+    @Published var customAccentHex: String { didSet { save(customAccentHex, "accentHex") } }
+    /// Show the Now Playing cover as a spinning vinyl record.
+    @Published var vinylArtwork: Bool { didSet { save(vinylArtwork, "vinylArt") } }
 
     // MARK: Battery
 
@@ -414,6 +418,8 @@ final class AppSettings: ObservableObject {
         showVisualizer = b("visualizer", true)
         blurredArtBackground = b("blurBG", true)
         keepScreenAwake = b("awake", false)
+        customAccentHex = s("accentHex", "")
+        vinylArtwork = b("vinylArt", false)
         powerMode = PowerMode(rawValue: i("powerMode", PowerMode.always.rawValue)) ?? .always
 
         sleepFadeOut = b("sleepFade", true)
