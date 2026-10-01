@@ -264,12 +264,20 @@ struct SettingsView: View {
     private var aboutSection: some View {
         Section {
             HStack { Text("Version"); Spacer(); Text(Self.appVersion).foregroundStyle(.secondary) }
+            if let expiry = SigningStatus.expiry {
+                HStack {
+                    Text("Works until")
+                    Spacer()
+                    Text(SigningStatus.formatted(expiry))
+                        .foregroundStyle((SigningStatus.daysLeft ?? 9) < 2 ? Color.red : Color.secondary)
+                }
+            }
             HStack { Text("Tracks"); Spacer(); Text("\(library.tracks.count)").foregroundStyle(.secondary) }
             HStack { Text("Total time"); Spacer(); Text(library.totalDuration.longFormat).foregroundStyle(.secondary) }
         } header: {
             Text("About")
         } footer: {
-            Text("Sonora plays the formats iOS can decode natively: MP3, AAC/M4A, ALAC, FLAC, WAV, AIFF and CAF. Formats like Opus, WMA, APE and DSD need a bundled decoder — see the project README.")
+            Text("You get a notification when Sideloadly refreshes Sonora, and reminders 2 days, 1 day and 3 hours before it expires. Sonora plays the formats iOS can decode natively: MP3, AAC/M4A, ALAC, FLAC, WAV, AIFF and CAF. Formats like Opus, WMA, APE and DSD need a bundled decoder — see the project README.")
         }
     }
 }
