@@ -36,27 +36,50 @@ final class AudioSessionManager: ObservableObject {
 
     private init() {}
 
-    func activate() {
+    /// Sets the category and starts listening for changes, without taking
+    /// the speaker. Safe to call while another app is playing: this does not
+    /// interrupt it. Used at launch and whenever the app comes to the front.
+    func configure() {
         let session = AVAudioSession.sharedInstance()
         do {
             // Standard routing, the same as Music and Spotify. The
             // `.longFormAudio` policy used before routes through a separate
             // long-form path that CarPlay and some car head units don't
             // treat as the system's Now Playing source.
-            try session.setCategory(.playback,
-                                    mode: .default,
-                                    policy: .default,
-                                    options: [])
-            try session.setActive(true, options: [])
+            if session.category != .playback || session.mode != .default {
+                try session.setCategory(.playback,
+                                        mode: .default,
+                                        policy: .default,
+                                        options: [])
+            }
         } catch {
-            print("[AudioSession] activation failed: \(error)")
+            print("[AudioSession] category failed: \(error)")
         }
         registerObservers()
         refreshRoute()
     }
 
+    /// Takes the speaker. Only called right before Sonora makes sound,
+    /// because activating stops any other app that is playing.
+    func activate() {
+        configure()
+        do {
+            try AVAudioSession.sharedInstance().setActive(true, options: [])
+        } catch {
+            print("[AudioSession] activation failed: \(error)")
+        }
+        refreshRoute()
+    }
+
+    /// Gives the speaker back and tells the app we interrupted that it may
+    /// resume.
     func deactivate() {
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        } catch {
+            // Busy (something still running) - harmless, try again next pause.
+            print("[AudioSession] deactivate skipped: \(error)")
+        }
     }
 
     /// Ask the hardware to run at the file's native rate so Core Audio does
@@ -106,7 +129,9 @@ final class AudioSessionManager: ObservableObject {
 
         observers.append(nc.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification,
                                         object: session, queue: .main) { [weak self] _ in
-            self?.activate()
+            // Rare: the system's audio service restarted. Set ourselves up
+            // again without stealing the speaker; play() reclaims it.
+            self?.configure()
             self?.onRouteConfigurationChanged?()
         })
     }
@@ -124,7 +149,9 @@ final class AudioSessionManager: ObservableObject {
             if let optRaw = info[AVAudioSessionInterruptionOptionKey] as? UInt {
                 shouldResume = AVAudioSession.InterruptionOptions(rawValue: optRaw).contains(.shouldResume)
             }
-            try? AVAudioSession.sharedInstance().setActive(true)
+            // No setActive here: if we are not resuming, re-activating
+            // would cut off the app that just finished (or another one).
+            // play() activates the session itself when it resumes.
             onInterruptionEnded?(shouldResume)
         @unknown default:
             break

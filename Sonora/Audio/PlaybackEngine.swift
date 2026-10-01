@@ -44,6 +44,17 @@ private struct Segment {
 /// outside Int64, and all three can come out of a bad tag, a malformed cue
 /// sheet or a zero sample rate. Negative results clamp to 0 and the ceiling
 /// (about 290 days at 44.1 kHz) is far beyond any real file.
+/// Runs `body`, turning an Objective-C exception from AVAudioEngine into a
+/// logged `false` instead of a crash. See SonoraObjC.h.
+@discardableResult
+func sonoraCatch(_ label: String, _ body: () -> Void) -> Bool {
+    if let reason = SonoraObjC.catchException(body) {
+        print("[Engine] \(label) raised \(reason)")
+        return false
+    }
+    return true
+}
+
 func sonoraFramePosition(seconds: Double, sampleRate: Double) -> AVAudioFramePosition {
     let value = seconds * sampleRate
     let ceiling: Double = 1_099_511_627_776   // 2^40
@@ -111,6 +122,10 @@ final class PlaybackEngine {
     /// Guards against a configuration-change notification arriving while we are
     /// part-way through rebuilding the graph for the last one.
     private var isRebuilding = false
+    /// The hardware changed while we were not playing. Rebuilding right then
+    /// would mean grabbing the audio session from whichever app is playing
+    /// now, so the rebuild waits for our next play().
+    private var graphNeedsRebuild = false
 
     /// Set the moment a new schedule is installed, cleared once the node
     /// reports a sample time that actually falls inside it.
@@ -209,24 +224,40 @@ final class PlaybackEngine {
     private func buildGraph() {
         let fmt = chainFormat
 
-        engine.connect(gainA, to: sourceMixer, format: fmt)
-        engine.connect(gainB, to: sourceMixer, format: fmt)
+        sonoraCatch("connect graph") {
+            engine.connect(gainA, to: sourceMixer, format: fmt)
+            engine.connect(gainB, to: sourceMixer, format: fmt)
+        }
 
         // Player -> gain connections are (re)made per file format in `connectPlayer`.
         connectPlayer(playerA, to: gainA, format: currentFormat ?? fmt)
         connectPlayer(playerB, to: gainB, format: currentFormat ?? fmt)
 
-        var previous: AVAudioNode = sourceMixer
-        for node in chain.orderedNodes {
-            engine.connect(previous, to: node, format: fmt)
-            previous = node
+        sonoraCatch("connect chain") {
+            var previous: AVAudioNode = sourceMixer
+            for node in chain.orderedNodes {
+                engine.connect(previous, to: node, format: fmt)
+                previous = node
+            }
+            engine.connect(previous, to: engine.mainMixerNode, format: fmt)
         }
-        engine.connect(previous, to: engine.mainMixerNode, format: fmt)
 
         // Preparing against a route with no hardware format (mid route change,
         // during a call) can raise an Objective-C exception. `start()` prepares
         // on its own later, so skipping it here costs nothing.
-        if outputRouteIsUsable { engine.prepare() }
+        if outputRouteIsUsable { sonoraCatch("prepare") { engine.prepare() } }
+    }
+
+    /// Tears the graph down and rebuilds it at `format`.
+    private func resetGraph(to format: AVAudioFormat) {
+        stopEngineOnly()
+        chainFormat = format
+        for node in chain.orderedNodes { engine.disconnectNodeOutput(node) }
+        engine.disconnectNodeOutput(sourceMixer)
+        engine.disconnectNodeOutput(gainA)
+        engine.disconnectNodeOutput(gainB)
+        buildGraph()
+        chain.applyAll()
     }
 
     /// False while the hardware reports no usable output format. Starting or
@@ -249,8 +280,10 @@ final class PlaybackEngine {
     private func connectPlayer(_ node: AVAudioPlayerNode,
                                to mixer: AVAudioMixerNode,
                                format: AVAudioFormat) {
-        engine.disconnectNodeOutput(node)
-        engine.connect(node, to: mixer, format: format)
+        sonoraCatch("connect player") {
+            engine.disconnectNodeOutput(node)
+            engine.connect(node, to: mixer, format: format)
+        }
     }
 
     private func hookSession() {
@@ -284,6 +317,19 @@ final class PlaybackEngine {
     private func rebuildForCurrentRoute(force: Bool = false) {
         guard !isRebuilding else { return }
         let sr = AVAudioSession.sharedInstance().sampleRate
+
+        // Not playing: another app may own the speaker right now (it is often
+        // that app's own sample-rate switch that sent us here). Rebuilding
+        // would reload the song, re-activate our session and cut that app
+        // off - the "Sonora stops my other app" bug. Remember and do it on
+        // our next play() instead.
+        guard isPlaying else {
+            if force || (sr > 0 && abs(sr - chainFormat.sampleRate) > 1) {
+                graphNeedsRebuild = true
+            }
+            return
+        }
+
         guard sr > 0 else { return }
         // A configuration change has already invalidated the connections, so
         // the graph has to be rebuilt whether or not the rate moved.
@@ -297,14 +343,8 @@ final class PlaybackEngine {
         let wasPlaying = isPlaying
         let item = currentItem
 
-        stopEngineOnly()
-        chainFormat = rebuilt
-        for node in chain.orderedNodes { engine.disconnectNodeOutput(node) }
-        engine.disconnectNodeOutput(sourceMixer)
-        engine.disconnectNodeOutput(gainA)
-        engine.disconnectNodeOutput(gainB)
-        buildGraph()
-        chain.applyAll()
+        graphNeedsRebuild = false
+        resetGraph(to: rebuilt)
 
         if var item {
             item.startTime = resumePosition
@@ -320,11 +360,15 @@ final class PlaybackEngine {
             onError?("No audio output is available right now.")
             return
         }
-        do {
+        var startError: Error?
+        let survived = sonoraCatch("start") {
             engine.prepare()
-            try engine.start()
-        } catch {
-            onError?("Audio engine failed to start: \(error.localizedDescription)")
+            do { try engine.start() } catch { startError = error }
+        }
+        if !survived {
+            onError?("The audio output is busy. Try again in a moment.")
+        } else if let startError {
+            onError?("Audio engine failed to start: \(startError.localizedDescription)")
         }
     }
 
@@ -352,6 +396,10 @@ final class PlaybackEngine {
         frozenTime = currentTime
         engine.pause()
         updateTicker()
+        // Hand the speaker back. Other apps (Spotify, YouTube, a podcast)
+        // that we interrupted can then carry on, the way they do after
+        // Apple Music pauses. play() takes it again.
+        session.deactivate()
     }
 
     private func stopEngineOnly() {
@@ -364,7 +412,11 @@ final class PlaybackEngine {
 
     /// Loads and (optionally) starts an item, replacing anything scheduled.
     func load(item: PlayableItem, autoplay: Bool) {
-        session.activate()
+        // Only claim the audio session when we are about to make sound.
+        // Loading quietly (restoring the last song at launch, a seek while
+        // paused) used to activate it too, which stopped whatever other app
+        // was playing just because Sonora was opened.
+        if autoplay { session.activate() }
 
         guard let file = openFile(for: item) else {
             onError?("Cannot open \(item.url.lastPathComponent)")
@@ -384,15 +436,9 @@ final class PlaybackEngine {
         // handler rebuild once a real rate exists.
         if achieved > 0, abs(achieved - chainFormat.sampleRate) > 1,
            let rebuilt = AVAudioFormat(standardFormatWithSampleRate: achieved, channels: 2) {
-            chainFormat = rebuilt
-            for node in chain.orderedNodes { engine.disconnectNodeOutput(node) }
-            engine.disconnectNodeOutput(sourceMixer)
-            engine.disconnectNodeOutput(gainA)
-            engine.disconnectNodeOutput(gainB)
-            engine.stop()
-            buildGraph()
-            chain.applyAll()
+            resetGraph(to: rebuilt)
         }
+        if autoplay { graphNeedsRebuild = false }
 
         playerA.stop()
         playerB.stop()
@@ -552,6 +598,22 @@ final class PlaybackEngine {
         // Another app may have taken the session while we were paused (lock
         // screen resume), so reclaim it before starting the engine.
         session.activate()
+
+        // The hardware changed while we were paused (usually another app
+        // switching the sample rate). Rebuild now that the session is ours,
+        // then resume from the same spot.
+        if graphNeedsRebuild, var item = currentItem {
+            graphNeedsRebuild = false
+            let sr = AVAudioSession.sharedInstance().sampleRate
+            if sr > 0, let fmt = AVAudioFormat(standardFormatWithSampleRate: sr, channels: 2) {
+                let resumeAt = currentTime
+                resetGraph(to: fmt)
+                item.startTime = resumeAt
+                load(item: item, autoplay: true)
+                return
+            }
+        }
+
         ensureEngineRunning()
         // `AVAudioPlayerNode.play()` raises an Objective-C exception - an
         // instant crash Swift cannot catch - when the engine is not running.
@@ -563,7 +625,15 @@ final class PlaybackEngine {
             if wasPlaying { onPlayStateChanged?(false) }
             return
         }
-        if !player.isPlaying { player.play() }
+        if !player.isPlaying {
+            let started = sonoraCatch("player.play") { player.play() }
+            guard started else {
+                isPlaying = false
+                updateTicker()
+                if wasPlaying { onPlayStateChanged?(false) }
+                return
+            }
+        }
         // Re-anchor extrapolation: frozenTime was captured at pause, and the
         // time spent paused must not count as elapsed playback.
         if !wasPlaying { frozenAt = CACurrentMediaTime() }
@@ -681,7 +751,12 @@ final class PlaybackEngine {
             target.stop()
             return
         }
-        target.play()
+        guard sonoraCatch("crossfade play", { target.play() }) else {
+            liveScheduleIDs.remove(scheduleID)
+            crossfadeScheduleID = nil
+            target.stop()
+            return
+        }
 
         pendingCrossfadeItem = item
         crossfadeRamp = (CACurrentMediaTime(), max(0.2, settings.crossfadeSeconds))
@@ -899,7 +974,6 @@ final class PlaybackEngine {
         // bus format (no output route). Skip the visualizer rather than crash.
         let busFormat = engine.mainMixerNode.outputFormat(forBus: 0)
         guard busFormat.sampleRate > 0, busFormat.channelCount > 0 else { return }
-        isMeterTapInstalled = true
 
         // Allocated once, up here, instead of on every buffer inside the tap.
         // The old version built a fresh 24-element array and hopped to the
@@ -912,6 +986,7 @@ final class PlaybackEngine {
         // `nil` taps the bus in whatever format it has when audio flows. An
         // explicit format captured here goes stale after a graph rebuild at a
         // new sample rate, and a mismatched tap format is another exception.
+        let installed = sonoraCatch("installTap") {
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 2048, format: nil) { buffer, _ in
             guard let data = buffer.floatChannelData else { return }
             let frames = Int(buffer.frameLength)
@@ -945,5 +1020,7 @@ final class PlaybackEngine {
             let snapshot = levels
             DispatchQueue.main.async { handler(snapshot) }
         }
+        }
+        isMeterTapInstalled = installed
     }
 }
