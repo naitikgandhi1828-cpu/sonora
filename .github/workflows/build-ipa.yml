@@ -11,7 +11,7 @@ name: Build unsigned IPA
 on:
   workflow_dispatch:        # lets you press the button manually
   push:
-    branches: [ main, master ]
+    branches: [ main, master, battery-saver ]
 
 jobs:
   build:
