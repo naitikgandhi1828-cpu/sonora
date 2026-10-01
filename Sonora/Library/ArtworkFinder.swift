@@ -11,10 +11,15 @@
 //       root re-mounted read-only at scan time — so it is worth another look.
 //    2. Artwork embedded in a *sibling* track. Cue rips and multi-disc sets
 //       often tag only one file of the album.
-//    3. The iTunes Search API, which needs no key and returns 600px covers.
+//    3. Free, key-less online catalogues, in order, until one gives a
+//       confident match: the iTunes Search API (600px covers), then Deezer
+//       (1000px), then MusicBrainz + the Cover Art Archive (good for rare and
+//       indie releases). The fallbacks are stricter than iTunes: they need
+//       the exact album title *and* a matching artist.
 //
 //  Only the third leaves the device, and only when the user has left "Download
-//  missing artwork" on. Everything found is written into the shared
+//  missing artwork" on (each catalogue can also be switched off on its own
+//  in the tag editor's Auto-fill sources menu). Everything found is written into the shared
 //  ArtworkStore under the album key, so one lookup covers a whole album.
 //
 
@@ -132,11 +137,21 @@ final class ArtworkFinder: ObservableObject {
 
         guard allowNetwork else { return false }
 
-        guard let data = await Self.downloadCover(artist: track.effectiveAlbumArtist,
-                                                  album: track.displayAlbum),
-              let key = await Self.store(data, forAlbumKey: albumKey) else { return false }
-        adopt(key: key, forAlbumKey: albumKey)
-        return true
+        // iTunes, then Deezer, then MusicBrainz/Cover Art Archive, stopping at
+        // the first confident match. `LookupSource.allCases` is in that order.
+        for source in LookupSource.enabledSources {
+            // A cancelled sweep stops between requests (the flag is only
+            // meaningful while a sweep is running).
+            if Task.isCancelled || (isRunning && cancelled) { return false }
+            guard let data = await Self.downloadCover(from: source,
+                                                      artist: track.effectiveAlbumArtist,
+                                                      album: track.displayAlbum) else { continue }
+            if let key = await Self.store(data, forAlbumKey: albumKey) {
+                adopt(key: key, forAlbumKey: albumKey)
+                return true
+            }
+        }
+        return false
     }
 
     /// Sidecar image beside the files, or art embedded in a sibling track.
@@ -177,6 +192,57 @@ final class ArtworkFinder: ObservableObject {
     private func adopt(key: String, forAlbumKey albumKey: String) {
         library.setArtworkKey(key, forAlbumKey: albumKey)
         onArtworkFound?(albumKey)
+    }
+
+    // MARK: - Online sources
+
+    nonisolated private static func downloadCover(from source: LookupSource,
+                                                  artist: String,
+                                                  album: String) async -> Data? {
+        switch source {
+        case .itunes:
+            return await downloadCover(artist: artist, album: album)
+        case .deezer:
+            return await downloadDeezerCover(artist: artist, album: album)
+        case .musicbrainz:
+            return await downloadMusicBrainzCover(artist: artist, album: album)
+        }
+    }
+
+    /// Deezer album search. Fallbacks only run with a real artist name: a
+    /// bare "Greatest Hits" is far too likely to find somebody else's.
+    nonisolated private static func downloadDeezerCover(artist: String, album: String) async -> Data? {
+        let artist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        let album = Self.strippingEditionSuffixes(album)
+        guard !LookupText.isPlaceholder(artist), !LookupText.isPlaceholder(album),
+              let albums = try? await DeezerLookup.searchAlbums(artist: artist, album: album, limit: 8),
+              let index = bestMatchIndex(albums: albums.map(\.album), artists: albums.map(\.artist),
+                                         artist: artist, album: album, strict: true) else { return nil }
+        return await downloadImage(albums[index].coverURL)
+    }
+
+    /// MusicBrainz release search, cover from the Cover Art Archive (1200px,
+    /// else 500px; a 404 means the release has no cover). MusicBrainz calls
+    /// are spaced at least a second apart by MusicBrainzGate.
+    nonisolated private static func downloadMusicBrainzCover(artist: String, album: String) async -> Data? {
+        let artist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        let album = Self.strippingEditionSuffixes(album)
+        guard !LookupText.isPlaceholder(artist), !LookupText.isPlaceholder(album),
+              let releases = try? await MusicBrainzLookup.searchReleases(artist: artist, album: album, limit: 8),
+              let index = bestMatchIndex(albums: releases.map(\.album), artists: releases.map(\.artist),
+                                         artist: artist, album: album, strict: true) else { return nil }
+        let release = releases[index]
+        return await MusicBrainzLookup.downloadCover(releaseID: release.releaseID,
+                                                     releaseGroupID: release.releaseGroupID)
+    }
+
+    nonisolated private static func downloadImage(_ url: URL) async -> Data? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 12
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              UIImage(data: data) != nil else { return nil }
+        return data
     }
 
     // MARK: - iTunes Search
@@ -233,35 +299,55 @@ final class ArtworkFinder: ObservableObject {
     nonisolated private static func bestMatch(in results: [SearchResponse.Result],
                                   artist: String,
                                   album: String) -> SearchResponse.Result? {
+        guard let index = bestMatchIndex(albums: results.map { $0.collectionName ?? "" },
+                                         artists: results.map { $0.artistName ?? "" },
+                                         artist: artist, album: album, strict: false) else { return nil }
+        return results[index]
+    }
+
+    /// Index of the best-matching album, or nil when nothing matches well
+    /// enough. Non-strict (iTunes, as before): the album title has to match
+    /// exactly or by prefix; the artist only improves the score. Strict (the
+    /// Deezer / MusicBrainz fallbacks): exact album title *and* an artist
+    /// match, because a wrong cover is worse than none.
+    nonisolated private static func bestMatchIndex(albums: [String],
+                                                   artists: [String],
+                                                   artist: String,
+                                                   album: String,
+                                                   strict: Bool) -> Int? {
         let wantAlbum = normalise(album)
         let wantArtist = normalise(artist)
         guard !wantAlbum.isEmpty else { return nil }
+        if strict && wantArtist.isEmpty { return nil }
 
-        var best: (result: SearchResponse.Result, score: Int)?
-        for result in results {
-            let gotAlbum = normalise(strippingEditionSuffixes(result.collectionName ?? ""))
+        var best: (index: Int, score: Int)?
+        for (i, name) in albums.enumerated() {
+            let gotAlbum = normalise(strippingEditionSuffixes(name))
             guard !gotAlbum.isEmpty else { continue }
 
             var score = 0
             if gotAlbum == wantAlbum {
                 score += 4
-            } else if gotAlbum.hasPrefix(wantAlbum) || wantAlbum.hasPrefix(gotAlbum) {
+            } else if !strict, gotAlbum.hasPrefix(wantAlbum) || wantAlbum.hasPrefix(gotAlbum) {
                 score += 2
             } else {
                 continue    // album title has to match; artist alone is not enough
             }
 
-            let gotArtist = normalise(result.artistName ?? "")
+            let gotArtist = normalise(i < artists.count ? artists[i] : "")
+            var artistScore = 0
             if !wantArtist.isEmpty, gotArtist == wantArtist {
-                score += 3
-            } else if !wantArtist.isEmpty,
+                artistScore = 3
+            } else if !wantArtist.isEmpty, !gotArtist.isEmpty,
                       gotArtist.contains(wantArtist) || wantArtist.contains(gotArtist) {
-                score += 1
+                artistScore = 1
             }
+            if strict && artistScore == 0 { continue }
+            score += artistScore
 
-            if score > (best?.score ?? 0) { best = (result, score) }
+            if score > (best?.score ?? 0) { best = (i, score) }
         }
-        return best?.result
+        return best?.index
     }
 
     /// "Album (Deluxe Edition) [Remastered]" -> "Album".
