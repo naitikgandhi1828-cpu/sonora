@@ -97,6 +97,64 @@ enum PowerMode: Int, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// How the cover is drawn on the Now Playing screen.
+enum ArtworkShape: Int, Codable, CaseIterable, Identifiable {
+    case rounded = 0, square = 1, circle = 2, vinyl = 3
+    var id: Int { rawValue }
+    var label: String {
+        switch self {
+        case .rounded: return "Rounded"
+        case .square: return "Square"
+        case .circle: return "Circle"
+        case .vinyl: return "Vinyl Record"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .rounded: return "app"
+        case .square: return "square"
+        case .circle: return "circle"
+        case .vinyl: return "record.circle"
+        }
+    }
+}
+
+/// Look of the spectrum visualizer on the Now Playing cover.
+enum VisualizerStyle: Int, Codable, CaseIterable, Identifiable {
+    case bars = 0, mirror = 1, wave = 2
+    var id: Int { rawValue }
+    var label: String {
+        switch self {
+        case .bars: return "Bars"
+        case .mirror: return "Mirror"
+        case .wave: return "Wave"
+        }
+    }
+}
+
+/// App-wide typeface family.
+enum FontStyle: Int, Codable, CaseIterable, Identifiable {
+    case standard = 0, rounded = 1, serif = 2, mono = 3
+    var id: Int { rawValue }
+    var label: String {
+        switch self {
+        case .standard: return "Default"
+        case .rounded: return "Rounded"
+        case .serif: return "Serif"
+        case .mono: return "Mono"
+        }
+    }
+    /// nil keeps the system's own design.
+    var design: Font.Design? {
+        switch self {
+        case .standard: return nil
+        case .rounded: return .rounded
+        case .serif: return .serif
+        case .mono: return .monospaced
+        }
+    }
+}
+
 @propertyWrapper
 struct Stored<Value: Codable> {
     let key: String
@@ -261,8 +319,36 @@ final class AppSettings: ObservableObject {
     @Published var keepScreenAwake: Bool { didSet { save(keepScreenAwake, "awake") } }
     /// "#RRGGBB" accent chosen by the user; empty means use the theme's own.
     @Published var customAccentHex: String { didSet { save(customAccentHex, "accentHex") } }
-    /// Show the Now Playing cover as a spinning vinyl record.
-    @Published var vinylArtwork: Bool { didSet { save(vinylArtwork, "vinylArt") } }
+    /// Shape of the Now Playing cover (Rounded, Square, Circle, Vinyl).
+    @Published var artworkShape: ArtworkShape {
+        didSet {
+            save(artworkShape.rawValue, "artShape")
+            // Older builds read this flag; keep it in step.
+            save(artworkShape == .vinyl, "vinylArt")
+        }
+    }
+    /// Show the Now Playing cover as a spinning vinyl record. Kept for older
+    /// callers; it is now just one of the artwork shapes.
+    var vinylArtwork: Bool {
+        get { artworkShape == .vinyl }
+        set {
+            if newValue { artworkShape = .vinyl }
+            else if artworkShape == .vinyl { artworkShape = .rounded }
+        }
+    }
+
+    // MARK: Visual effects
+
+    /// Slowly drifting colour glow behind the Now Playing screen.
+    @Published var ambientBackground: Bool { didSet { save(ambientBackground, "ambientBG") } }
+    /// Cover shrinks a little when paused and springs back when playing.
+    @Published var breathingArtwork: Bool { didSet { save(breathingArtwork, "breatheArt") } }
+    /// Coloured shadow under the cover, taken from the album colour.
+    @Published var artworkGlow: Bool { didSet { save(artworkGlow, "artGlow") } }
+    @Published var visualizerStyle: VisualizerStyle { didSet { save(visualizerStyle.rawValue, "vizStyle") } }
+    @Published var fontStyle: FontStyle { didSet { save(fontStyle.rawValue, "fontStyle") } }
+    /// Frosted-glass panels behind the player controls and mini player.
+    @Published var glassControls: Bool { didSet { save(glassControls, "glassUI") } }
 
     // MARK: Battery
 
@@ -419,7 +505,16 @@ final class AppSettings: ObservableObject {
         blurredArtBackground = b("blurBG", true)
         keepScreenAwake = b("awake", false)
         customAccentHex = s("accentHex", "")
-        vinylArtwork = b("vinylArt", false)
+        // Users who had the old vinyl switch on keep their record.
+        artworkShape = ArtworkShape(rawValue: i("artShape", b("vinylArt", false)
+                                                ? ArtworkShape.vinyl.rawValue
+                                                : ArtworkShape.rounded.rawValue)) ?? .rounded
+        ambientBackground = b("ambientBG", false)
+        breathingArtwork = b("breatheArt", true)
+        artworkGlow = b("artGlow", false)
+        visualizerStyle = VisualizerStyle(rawValue: i("vizStyle", 0)) ?? .bars
+        fontStyle = FontStyle(rawValue: i("fontStyle", 0)) ?? .standard
+        glassControls = b("glassUI", false)
         powerMode = PowerMode(rawValue: i("powerMode", PowerMode.always.rawValue)) ?? .always
 
         sleepFadeOut = b("sleepFade", true)
