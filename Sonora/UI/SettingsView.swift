@@ -180,6 +180,7 @@ struct SettingsView: View {
             }
             Toggle("Tint from album art", isOn: $settings.useAlbumArtColors)
             Toggle("Blurred art background", isOn: $settings.blurredArtBackground)
+            Toggle("Spinning vinyl artwork", isOn: $settings.vinylArtwork)
             Toggle("Waveform seek bar", isOn: $settings.showWaveformSeekBar)
             Toggle("Spectrum visualizer", isOn: $settings.showVisualizer)
             Toggle("Keep screen awake while playing", isOn: $settings.keepScreenAwake)
@@ -263,20 +264,12 @@ struct SettingsView: View {
     private var aboutSection: some View {
         Section {
             HStack { Text("Version"); Spacer(); Text(Self.appVersion).foregroundStyle(.secondary) }
-            if let expiry = SigningStatus.expiry {
-                HStack {
-                    Text("Works until")
-                    Spacer()
-                    Text(SigningStatus.formatted(expiry))
-                        .foregroundStyle((SigningStatus.daysLeft ?? 9) < 2 ? Color.red : Color.secondary)
-                }
-            }
             HStack { Text("Tracks"); Spacer(); Text("\(library.tracks.count)").foregroundStyle(.secondary) }
             HStack { Text("Total time"); Spacer(); Text(library.totalDuration.longFormat).foregroundStyle(.secondary) }
         } header: {
             Text("About")
         } footer: {
-            Text("You get a notification when Sideloadly refreshes Sonora, and reminders 2 days, 1 day and 3 hours before it expires. Sonora plays the formats iOS can decode natively: MP3, AAC/M4A, ALAC, FLAC, WAV, AIFF and CAF. Formats like Opus, WMA, APE and DSD need a bundled decoder — see the project README.")
+            Text("Sonora plays the formats iOS can decode natively: MP3, AAC/M4A, ALAC, FLAC, WAV, AIFF and CAF. Formats like Opus, WMA, APE and DSD need a bundled decoder — see the project README.")
         }
     }
 }
@@ -294,31 +287,91 @@ extension SettingsView {
 
 struct ThemePickerView: View {
     @EnvironmentObject private var themes: ThemeManager
+    @EnvironmentObject private var settings: AppSettings
+
+    @State private var accentDraft: Color = .orange
 
     var body: some View {
-        List(Theme.all) { theme in
-            Button {
-                themes.select(theme)
-                Haptics.select()
-            } label: {
-                HStack(spacing: 14) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 8).fill(theme.background)
-                        Circle().fill(theme.gradient).frame(width: 22, height: 22)
-                    }
-                    .frame(width: 46, height: 46)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.separator, lineWidth: 1))
-
-                    Text(theme.name)
-                    Spacer()
-                    if themes.theme.id == theme.id {
-                        Image(systemName: "checkmark").foregroundStyle(theme.accent)
-                    }
+        List {
+            Section {
+                Toggle("Custom accent colour", isOn: Binding(
+                    get: { themes.customAccent != nil },
+                    set: { on in
+                        themes.setCustomAccent(on ? accentDraft : nil)
+                        Haptics.select()
+                    }))
+                if themes.customAccent != nil {
+                    ColorPicker("Accent", selection: Binding(
+                        get: { themes.customAccent ?? accentDraft },
+                        set: { color in
+                            accentDraft = color
+                            themes.setCustomAccent(color)
+                        }), supportsOpacity: false)
+                    swatchRow
                 }
+            } header: {
+                Text("Accent")
+            } footer: {
+                Text("Replaces the theme's highlight colour everywhere. \"Tint from album art\" still wins while it is on.")
             }
-            .foregroundStyle(.primary)
+
+            Section("Dark") {
+                ForEach(Theme.dark) { row($0) }
+            }
+            Section("Light") {
+                ForEach(Theme.light) { row($0) }
+            }
         }
         .navigationTitle("Theme")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { accentDraft = themes.customAccent ?? themes.baseTheme.accent }
+    }
+
+    /// Quick picks so nobody has to fiddle with the colour wheel.
+    private var swatchRow: some View {
+        let picks: [Color] = [
+            Theme.rgb(255, 135, 76), Theme.rgb(239, 58, 72), Theme.rgb(255, 68, 173),
+            Theme.rgb(178, 140, 255), Theme.rgb(94, 158, 255), Theme.rgb(38, 198, 218),
+            Theme.rgb(76, 217, 148), Theme.rgb(232, 190, 92)
+        ]
+        return HStack(spacing: 10) {
+            ForEach(Array(picks.enumerated()), id: \.offset) { _, color in
+                Button {
+                    accentDraft = color
+                    themes.setCustomAccent(color)
+                    Haptics.select()
+                } label: {
+                    Circle().fill(color)
+                        .frame(width: 28, height: 28)
+                        .overlay(Circle().stroke(Color.primary.opacity(
+                            themes.customAccent?.hexString == color.hexString ? 0.9 : 0), lineWidth: 2))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func row(_ theme: Theme) -> some View {
+        Button {
+            themes.select(theme)
+            Haptics.select()
+        } label: {
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8).fill(theme.background)
+                    Circle().fill(theme.gradient).frame(width: 22, height: 22)
+                }
+                .frame(width: 46, height: 46)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.separator, lineWidth: 1))
+
+                Text(theme.name)
+                Spacer()
+                if settings.themeID == theme.id {
+                    Image(systemName: "checkmark").foregroundStyle(themes.accent)
+                }
+            }
+        }
+        .foregroundStyle(.primary)
     }
 }
