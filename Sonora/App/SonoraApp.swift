@@ -8,6 +8,7 @@
 import SwiftUI
 import UIKit
 import AVFoundation
+import UserNotifications
 
 @main
 struct SonoraApp: App {
@@ -26,6 +27,7 @@ struct SonoraApp: App {
         // Sonora never stops another app's music.
         AudioSessionManager.shared.configure()
         PowerState.startMonitoring()
+        UNUserNotificationCenter.current().delegate = ForegroundNotifications.shared
         // Tell iOS up front that Sonora takes remote-control events (lock
         // screen, headphones, car head units, CarPlay's Now Playing).
         UIApplication.shared.beginReceivingRemoteControlEvents()
@@ -73,6 +75,9 @@ struct SonoraApp: App {
                 // Refresh the route only; activating here would interrupt
                 // Spotify or YouTube every time you switch to Sonora.
                 AudioSessionManager.shared.configure()
+                // Confirms a Sideloadly refresh and keeps the expiry reminders up to date.
+                SigningStatus.requestPermission()
+                SigningStatus.check()
             @unknown default:
                 break
             }
