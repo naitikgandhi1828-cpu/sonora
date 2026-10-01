@@ -8,6 +8,7 @@
 import SwiftUI
 import UIKit
 import AVFoundation
+import UserNotifications
 
 @main
 struct SonoraApp: App {
@@ -24,6 +25,7 @@ struct SonoraApp: App {
         // The audio session has to exist before the engine is built.
         AudioSessionManager.shared.activate()
         PowerState.startMonitoring()
+        UNUserNotificationCenter.current().delegate = ForegroundNotifications.shared
         // Tell iOS up front that Sonora takes remote-control events (lock
         // screen, headphones, car head units, CarPlay's Now Playing).
         UIApplication.shared.beginReceivingRemoteControlEvents()
@@ -69,6 +71,9 @@ struct SonoraApp: App {
                 library.save()
             case .active:
                 AudioSessionManager.shared.activate()
+                // Confirms a Sideloadly refresh and keeps the expiry reminders up to date.
+                SigningStatus.requestPermission()
+                SigningStatus.check()
             @unknown default:
                 break
             }
