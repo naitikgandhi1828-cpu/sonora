@@ -4,6 +4,8 @@
 //
 //  Online lookups for the tag editor: song matches and album covers from
 //  Apple's public iTunes Search API (no key, no account, HTTPS only).
+//  The other catalogues (Deezer, MusicBrainz, LRCLIB) live in
+//  Sonora/Tags/Online and are merged by OnlineTagLookup.
 //
 //  Same approach as ArtworkFinder: URLComponents for the query, a short
 //  timeout, and the request carries nothing but the text the user sees in
@@ -28,7 +30,45 @@ struct TagLookupCandidate: Identifiable {
     var trackCount: Int?
     var discNumber: Int?
     var artworkURL100: URL?
+    /// The large cover: 600 px from iTunes, 1000 px from Deezer, 1200 px
+    /// from the Cover Art Archive.
     var artworkURL600: URL?
+
+    // Added for the multi-source lookup. All defaulted, so the iTunes code
+    // above (and anything else using the memberwise initialiser) still works.
+
+    /// Which catalogue this match came from.
+    var source: LookupSource = .itunes
+    /// Other catalogues that returned the same song (merged duplicates).
+    var alsoFoundIn: [LookupSource] = []
+    /// Song length in seconds, when the catalogue says.
+    var duration: TimeInterval?
+    /// Tried when `artworkURL600` fails (Cover Art Archive's smaller size).
+    var artworkFallbackURL: URL?
+    /// Deezer ids, used to fetch track/disc numbers and genre on pick.
+    var deezerTrackID: Int?
+    var deezerAlbumID: Int?
+    /// MusicBrainz release id.
+    var musicBrainzReleaseID: String?
+    /// Record label, when known (shown only; there's no tag field for it).
+    var label: String?
+    /// Match quality against the query; higher is better.
+    var score: Double = 0
+}
+
+/// One cover found online, for the tag editor's cover picker.
+struct CoverCandidate: Identifiable {
+    let id = UUID()
+    var source: LookupSource
+    var album: String
+    var artist: String
+    var year: Int?
+    var thumbnailURL: URL?
+    var fullURL: URL
+    var fallbackURL: URL?
+    /// "600 px", "1000 px", "up to 1200 px".
+    var sizeNote: String
+    var score: Double = 0
 }
 
 enum TagLookupError: LocalizedError {
@@ -37,13 +77,16 @@ enum TagLookupError: LocalizedError {
     case noResults
     case emptyQuery
     case badImage
+    case timedOut
 
     var errorDescription: String? {
         switch self {
         case .offline:
             return "You appear to be offline. Connect to the internet and try again."
         case .badResponse:
-            return "The iTunes catalogue didn't answer properly. Try again in a moment."
+            return "The online catalogue didn't answer properly. Try again in a moment."
+        case .timedOut:
+            return "The online catalogue took too long to answer. Try again in a moment."
         case .noResults:
             return "No matches found. Try fewer or different words."
         case .emptyQuery:
@@ -100,6 +143,37 @@ enum ITunesTagLookup {
 
     // MARK: - Cover search
 
+    /// Album covers for the cover picker: an album search on artist + album
+    /// when an album name is known, else a song search on `fallbackTerm`.
+    static func searchCovers(artist: String, album: String, fallbackTerm: String) async throws -> [CoverCandidate] {
+        let cleanAlbum = album.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanArtist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        var items: [Response.Item] = []
+        if !LookupText.isPlaceholder(cleanAlbum) {
+            let term = [LookupText.isPlaceholder(cleanArtist) ? "" : cleanArtist, cleanAlbum]
+                .filter { !$0.isEmpty }.joined(separator: " ")
+            items = try await search(term: term, entity: "album", limit: 10)
+        }
+        if items.isEmpty, !fallbackTerm.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            items = try await search(term: fallbackTerm, entity: "song", limit: 10)
+        }
+        var seen = Set<String>()
+        return items.compactMap { item -> CoverCandidate? in
+            guard let small = item.artworkUrl100, let thumb = URL(string: small),
+                  seen.insert(small).inserted else { return nil }
+            let full = largeArtworkURL(small) ?? thumb
+            let artistName = (item.collectionArtistName ?? item.artistName ?? "")
+            return CoverCandidate(source: .itunes,
+                                  album: item.collectionName ?? "",
+                                  artist: artistName,
+                                  year: year(from: item.releaseDate),
+                                  thumbnailURL: thumb,
+                                  fullURL: full,
+                                  fallbackURL: full == thumb ? nil : thumb,
+                                  sizeNote: "600 px")
+        }
+    }
+
     /// Finds an album cover and returns it as JPEG data (at most 1200 px).
     /// Searches albums by artist + album when an album name is known,
     /// otherwise falls back to a song search on `fallbackTerm`.
@@ -130,10 +204,24 @@ enum ITunesTagLookup {
         return try await downloadArtwork(url)
     }
 
+    /// Downloads `url`, or `fallback` when the first fails (404, bad image).
+    static func downloadArtwork(_ url: URL, fallback: URL?) async throws -> Data {
+        do {
+            return try await downloadArtwork(url)
+        } catch {
+            if error is CancellationError { throw error }
+            guard let fallback, fallback != url else { throw error }
+            return try await downloadArtwork(fallback)
+        }
+    }
+
     /// Downloads a cover image and returns it as JPEG data.
     static func downloadArtwork(_ url: URL) async throws -> Data {
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
+        // Cover Art Archive answers with a redirect to archive.org; the
+        // session follows it. Identify the app the way MusicBrainz asks.
+        request.setValue(LookupHTTP.userAgent, forHTTPHeaderField: "User-Agent")
         let fetched: (Data, URLResponse)
         do {
             fetched = try await URLSession.shared.data(for: request)

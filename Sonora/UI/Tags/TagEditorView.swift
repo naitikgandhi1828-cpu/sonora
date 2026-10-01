@@ -83,6 +83,7 @@ struct TagEditorView: View {
     let trackIDs: [UUID]
 
     @EnvironmentObject private var library: MediaLibrary
+    @EnvironmentObject private var themes: ThemeManager
     @Environment(\.dismiss) private var dismiss
 
     // Field values, their starting values, and which fields disagree.
@@ -98,6 +99,14 @@ struct TagEditorView: View {
     @State private var photoItem: PhotosPickerItem?
     @State private var isLoadingCover = false
     @State private var coverMessage: String?
+    @State private var showCoverPicker = false
+
+    // Lyrics lookup (LRCLIB)
+    @State private var isFindingLyrics = false
+    @State private var lyricsMessage: String?
+    @State private var lyricsTask: Task<Void, Never>?
+    /// Lyrics that were in the field before an online lookup replaced them.
+    @State private var previousLyrics: String?
 
     // Saving
     @State private var writeToFiles = true
@@ -113,6 +122,7 @@ struct TagEditorView: View {
     private var showsPerSongFields: Bool { !isBatch || editPerSongFields }
 
     var body: some View {
+        let theme = themes.theme
         NavigationStack {
             Form {
                 if tracks.isEmpty {
@@ -120,20 +130,23 @@ struct TagEditorView: View {
                         Text("These songs are no longer in your library.")
                             .foregroundStyle(.secondary)
                     }
+                    .themedRow(theme)
                 } else {
-                    headerSection
-                    artworkSection
-                    songSection
-                    albumSection
-                    commentSection
-                    if showsPerSongFields { lyricsSection }
-                    if isBatch { perSongToggleSection }
-                    saveOptionsSection
+                    headerSection.themedRow(theme)
+                    artworkSection.themedRow(theme)
+                    songSection.themedRow(theme)
+                    albumSection.themedRow(theme)
+                    commentSection.themedRow(theme)
+                    if showsPerSongFields { lyricsSection.themedRow(theme) }
+                    if isBatch { perSongToggleSection.themedRow(theme) }
+                    saveOptionsSection.themedRow(theme)
                 }
             }
+            .themedList(theme)
             .disabled(isSaving)
             .navigationTitle(isBatch ? "Edit \(tracks.count) Songs" : "Edit Tags")
             .navigationBarTitleDisplayMode(.inline)
+            .themedNavBar(theme)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
@@ -149,8 +162,20 @@ struct TagEditorView: View {
                 if isSaving { savingOverlay }
             }
             .sheet(isPresented: $showAutoTag) {
-                AutoTagView(initialQuery: autoTagQuery, isBatch: isBatch) { candidate, cover in
+                AutoTagView(initialQuery: autoTagQuery, isBatch: isBatch, hint: autoTagHint) { candidate, cover in
                     applyLookup(candidate, cover: cover)
+                }
+            }
+            .sheet(isPresented: $showCoverPicker) {
+                CoverPickerView(artist: coverSearchArtist,
+                                album: coverSearchAlbum,
+                                fallbackTerm: autoTagQuery) { data in
+                    if let image = UIImage(data: data) {
+                        setCover(data, preview: image)
+                        coverMessage = "Cover chosen. Tap Save to keep it."
+                    } else {
+                        coverMessage = TagLookupError.badImage.errorDescription
+                    }
                 }
             }
             .alert("Check the numbers",
@@ -168,8 +193,11 @@ struct TagEditorView: View {
         } message: {
             Text(summaryMessage ?? "")
         }
+        .tint(themes.accent)
+        .themedSheet(themes)
         .interactiveDismissDisabled(isSaving)
         .onAppear { loadIfNeeded() }
+        .onDisappear { lyricsTask?.cancel() }
         .onChange(of: photoItem) { _, item in
             loadPhoto(item)
         }
@@ -349,8 +377,37 @@ struct TagEditorView: View {
                     .frame(minHeight: 160)
                     .scrollContentBackground(.hidden)
             }
+            if !isBatch {
+                Button {
+                    findLyricsOnline()
+                } label: {
+                    HStack {
+                        Label("Find Lyrics Online", systemImage: "text.magnifyingglass")
+                        if isFindingLyrics {
+                            Spacer()
+                            ProgressView()
+                        }
+                    }
+                }
+                .disabled(isFindingLyrics)
+                if let previousLyrics {
+                    Button {
+                        values[.lyrics] = previousLyrics
+                        self.previousLyrics = nil
+                        lyricsMessage = nil
+                    } label: {
+                        Label("Restore Previous Lyrics", systemImage: "arrow.uturn.backward")
+                    }
+                }
+            }
         } header: {
             Text("Lyrics")
+        } footer: {
+            if let lyricsMessage {
+                Text(lyricsMessage)
+            } else if !isBatch {
+                Text("Looks the song up on LRCLIB, a free lyrics database. Only the title, artist, album and length are sent.")
+            }
         }
     }
 
@@ -459,6 +516,19 @@ struct TagEditorView: View {
                                          fileName: tracks.first?.fileName ?? "")
     }
 
+    /// Structured version of `autoTagQuery` so Deezer and MusicBrainz can
+    /// use fielded queries (artist:"…" track:"…").
+    private var autoTagHint: LookupHint? {
+        if isBatch {
+            return LookupHint(artist: firstNonEmpty(values[.albumArtist], values[.artist]),
+                              title: "",
+                              album: values[.album] ?? "")
+        }
+        let title = (values[.title] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return nil }
+        return LookupHint(artist: values[.artist] ?? "", title: title, album: values[.album] ?? "")
+    }
+
     private func firstNonEmpty(_ candidates: String?...) -> String {
         for c in candidates {
             if let c, !c.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return c }
@@ -509,30 +579,66 @@ struct TagEditorView: View {
         }
     }
 
+    private var coverSearchArtist: String {
+        firstNonEmpty(values[.albumArtist], values[.artist], tracks.first?.effectiveAlbumArtist)
+    }
+
+    private var coverSearchAlbum: String {
+        firstNonEmpty(values[.album], tracks.first?.album)
+    }
+
+    /// Opens the cover picker, which searches every enabled catalogue.
     private func findCoverOnline() {
-        let artist = firstNonEmpty(values[.albumArtist], values[.artist],
-                                   tracks.first?.effectiveAlbumArtist)
-        let album = firstNonEmpty(values[.album], tracks.first?.album)
-        let fallback = autoTagQuery
-        isLoadingCover = true
         coverMessage = nil
-        Task {
+        showCoverPicker = true
+    }
+
+    // MARK: - Lyrics lookup
+
+    private func findLyricsOnline() {
+        guard !isFindingLyrics, let track = tracks.first else { return }
+        let artist = firstNonEmpty(values[.artist], values[.albumArtist], track.artist)
+        var title = firstNonEmpty(values[.title], track.title)
+        if title.isEmpty {
+            // No title tag: use the file name the way Auto-fill does.
+            let stem = (track.fileName as NSString).deletingPathExtension
+            title = MetadataReader.parseFilename(stem).title
+        }
+        let album = firstNonEmpty(values[.album], track.album)
+        let duration: TimeInterval? = track.duration > 0 ? track.duration : nil
+        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            lyricsMessage = "Add a title first so the song can be looked up."
+            return
+        }
+        let existing = (values[.lyrics] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        isFindingLyrics = true
+        lyricsMessage = nil
+        lyricsTask?.cancel()
+        lyricsTask = Task {
             do {
-                let data = try await ITunesTagLookup.findCover(artist: artist,
-                                                               album: album,
-                                                               fallbackTerm: fallback)
-                if let image = UIImage(data: data) {
-                    setCover(data, preview: image)
-                    coverMessage = "Cover found. Tap Save to keep it."
+                let found = try await LRCLibLookup.find(artist: artist, title: title, album: album, duration: duration)
+                if Task.isCancelled { return }
+                if found.isInstrumental {
+                    lyricsMessage = "LRCLIB lists “\(found.trackName)” as an instrumental, so there are no lyrics to add."
                 } else {
-                    coverMessage = TagLookupError.badImage.errorDescription
+                    if !existing.isEmpty, existing != found.text.trimmingCharacters(in: .whitespacesAndNewlines) {
+                        previousLyrics = values[.lyrics]
+                    }
+                    values[.lyrics] = found.text
+                    let by = found.artistName.isEmpty ? "" : " by \(found.artistName)"
+                    lyricsMessage = existing.isEmpty
+                        ? "Lyrics found for “\(found.trackName)”\(by). Check them, then tap Save."
+                        : "Replaced the lyrics with LRCLIB's for “\(found.trackName)”\(by). Tap Restore Previous Lyrics to undo."
                 }
             } catch {
-                if !(error is CancellationError) {
-                    coverMessage = error.localizedDescription
+                if Task.isCancelled || error is CancellationError { return }
+                if let lookupError = error as? TagLookupError, lookupError == .noResults {
+                    lyricsMessage = "No lyrics found for this song on LRCLIB."
+                } else {
+                    lyricsMessage = error.localizedDescription
                 }
             }
-            isLoadingCover = false
+            isFindingLyrics = false
         }
     }
 
