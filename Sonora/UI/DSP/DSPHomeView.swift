@@ -33,7 +33,8 @@ struct DSPHomeView: View {
                 default: OutputView()
                 }
             }
-            .background(themes.theme.background)
+            .background(themes.theme.background.ignoresSafeArea())
+            .themedNavBar(themes.theme)
             .navigationTitle("Sound")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -523,7 +524,8 @@ struct SleepTimerView: View {
                 }
                 .padding(18)
             }
-            .background(themes.theme.background)
+            .background(themes.theme.background.ignoresSafeArea())
+            .themedNavBar(themes.theme)
             .navigationTitle("Sleep Timer")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -611,7 +613,7 @@ struct SleepTimerView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
                     .background(themes.accent, in: RoundedRectangle(cornerRadius: 10))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(themes.accent.isLight ? Color.black : Color.white)
             }
             .buttonStyle(.plain)
         }
