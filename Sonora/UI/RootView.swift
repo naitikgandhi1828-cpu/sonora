@@ -22,18 +22,22 @@ struct RootView: View {
         ZStack(alignment: .bottom) {
             TabView(selection: $selectedTab) {
                 LibraryHomeView()
+                    .themedTabBar(themes.theme)
                     .tabItem { Label("Library", systemImage: "music.note.house") }
                     .tag(0)
 
                 SearchView()
+                    .themedTabBar(themes.theme)
                     .tabItem { Label("Search", systemImage: "magnifyingglass") }
                     .tag(1)
 
                 NavigationStack { QueueContentView() }
+                    .themedTabBar(themes.theme)
                     .tabItem { Label("Queue", systemImage: "list.bullet") }
                     .tag(2)
 
                 SettingsView()
+                    .themedTabBar(themes.theme)
                     .tabItem { Label("Settings", systemImage: "gearshape") }
                     .tag(3)
             }
@@ -45,11 +49,25 @@ struct RootView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        .background(themes.theme.background.ignoresSafeArea())
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: player.currentTrack?.id)
         .fullScreenCover(isPresented: $showFullPlayer) {
             NowPlayingView()
+                .themedSheet(themes)
         }
         .preferredColorScheme(themes.colorScheme)
+        .fontDesign(settings.fontStyle.design)
+        // The album tint used to be worked out only while Now Playing was on
+        // screen, so the mini player kept a stale colour and a theme switch
+        // (light and dark use different brightness rules) left it wrong.
+        // RootView lives for the whole session, so it keeps the tint current.
+        .onAppear { themes.updateArtworkAccent(from: player.currentArtwork) }
+        .onChange(of: player.currentArtwork) { _, image in
+            themes.updateArtworkAccent(from: image)
+        }
+        .onChange(of: settings.useAlbumArtColors) { _, _ in
+            themes.refreshArtworkTint()
+        }
         .onChange(of: player.errorMessage) { _, message in
             showErrorAlert = message != nil
         }
@@ -82,14 +100,20 @@ private struct QueueContentView: View {
                                      isPlaying: index == player.currentIndex && player.isPlaying)
                                 .contentShape(Rectangle())
                                 .onTapGesture { player.jump(to: index); Haptics.tap() }
+                                .listRowBackground(index == player.currentIndex
+                                                   ? themes.accent.opacity(0.14) : Color.clear)
+                                .listRowSeparatorTint(themes.theme.separator)
                         }
                     }
                     .onDelete { player.removeFromQueue(at: $0) }
                     .onMove { player.moveInQueue(from: $0, to: $1) }
                 }
                 .listStyle(.plain)
+                .themedList(themes.theme)
             }
         }
+        .background(themes.theme.background.ignoresSafeArea())
+        .themedNavBar(themes.theme)
         .navigationTitle("Queue")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

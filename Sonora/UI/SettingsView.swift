@@ -32,6 +32,8 @@ struct SettingsView: View {
                 storageSection
                 aboutSection
             }
+            .themedList(themes.theme)
+            .themedNavBar(themes.theme)
             .navigationTitle("Settings")
             .fileImporter(isPresented: $showFolderPicker,
                           allowedContentTypes: [.folder],
@@ -121,6 +123,7 @@ struct SettingsView: View {
         } message: { root in
             Text("Its \(root.trackCount) tracks leave your library and playlists. The files themselves stay where they are, and you can add the folder again any time.")
         }
+        .themedRow(themes.theme)
     }
 
     private var playbackSection: some View {
@@ -145,6 +148,7 @@ struct SettingsView: View {
                           format: { $0 == 0 ? "Never" : String(format: "%.0f s", $0) })
         }
         .tint(themes.accent)
+        .themedRow(themes.theme)
     }
 
     private var batterySection: some View {
@@ -165,27 +169,40 @@ struct SettingsView: View {
             Text("Battery Saver hides the spectrum visualizer, lets the screen sleep, caps playback at 48 kHz (hi-res above that only matters with a wired USB DAC), stops the \"now playing\" bars from animating, and only builds waveforms or measures loudness while charging. AirPods, Bluetooth and the built-in speaker run at 48 kHz or below anyway, so they sound the same.")
         }
         .tint(themes.accent)
+        .themedRow(themes.theme)
     }
 
     private var appearanceSection: some View {
-        Section("Appearance") {
+        Section {
             NavigationLink {
                 ThemePickerView()
             } label: {
                 HStack {
                     Text("Theme")
                     Spacer()
-                    Text(themes.theme.name).foregroundStyle(.secondary)
+                    Text(themes.theme.name).foregroundStyle(themes.theme.textSecondary)
                 }
             }
-            Toggle("Tint from album art", isOn: $settings.useAlbumArtColors)
-            Toggle("Blurred art background", isOn: $settings.blurredArtBackground)
-            Toggle("Spinning vinyl artwork", isOn: $settings.vinylArtwork)
+            NavigationLink {
+                VisualEffectsView()
+            } label: {
+                Label("Visual Effects", systemImage: "sparkles")
+            }
+            Picker("Font style", selection: $settings.fontStyle) {
+                ForEach(FontStyle.allCases) { style in
+                    Text(style.label).fontDesign(style.design).tag(style)
+                }
+            }
+            Toggle("Tint player from album art", isOn: $settings.useAlbumArtColors)
             Toggle("Waveform seek bar", isOn: $settings.showWaveformSeekBar)
-            Toggle("Spectrum visualizer", isOn: $settings.showVisualizer)
             Toggle("Keep screen awake while playing", isOn: $settings.keepScreenAwake)
+        } header: {
+            Text("Appearance")
+        } footer: {
+            Text("The theme colours the whole app. \"Tint player from album art\" only recolours the Now Playing screen and mini player to match the cover.")
         }
         .tint(themes.accent)
+        .themedRow(themes.theme)
     }
 
     private var librarySection: some View {
@@ -203,6 +220,7 @@ struct SettingsView: View {
             .disabled(library.roots.isEmpty || library.isScanning)
         }
         .tint(themes.accent)
+        .themedRow(themes.theme)
     }
 
     private var artworkSection: some View {
@@ -240,6 +258,7 @@ struct SettingsView: View {
             Text("Sonora first looks for a cover image beside your files and for artwork tagged into another track of the same album. Only when that fails, and only with the switch above on, does it ask Apple's public iTunes Search catalogue — sending the artist and album name and nothing else. Turn it off to keep Sonora entirely offline.")
         }
         .tint(themes.accent)
+        .themedRow(themes.theme)
     }
 
     private var storageSection: some View {
@@ -259,11 +278,12 @@ struct SettingsView: View {
             Button("Erase Library Index", role: .destructive) { confirmWipe = true }
         }
         .tint(themes.accent)
+        .themedRow(themes.theme)
     }
 
     private var aboutSection: some View {
         Section {
-            HStack { Text("Version"); Spacer(); Text(Self.appVersion).foregroundStyle(.secondary) }
+            HStack { Text("Version"); Spacer(); Text(Self.appVersion).foregroundStyle(themes.theme.textSecondary) }
             if let expiry = SigningStatus.expiry {
                 HStack {
                     Text("Works until")
@@ -279,6 +299,7 @@ struct SettingsView: View {
         } footer: {
             Text("You get a notification when Sideloadly refreshes Sonora, and reminders 2 days, 1 day and 3 hours before it expires. Sonora plays the formats iOS can decode natively: MP3, AAC/M4A, ALAC, FLAC, WAV, AIFF and CAF. Formats like Opus, WMA, APE and DSD need a bundled decoder — see the project README.")
         }
+        .themedRow(themes.theme)
     }
 }
 
@@ -320,16 +341,22 @@ struct ThemePickerView: View {
             } header: {
                 Text("Accent")
             } footer: {
-                Text("Replaces the theme's highlight colour everywhere. \"Tint from album art\" still wins while it is on.")
+                Text("Replaces the theme's highlight colour everywhere. With \"Tint player from album art\" on, the Now Playing screen still follows the cover.")
             }
+            .themedRow(themes.theme)
 
             Section("Dark") {
                 ForEach(Theme.dark) { row($0) }
             }
+            .themedRow(themes.theme)
             Section("Light") {
                 ForEach(Theme.light) { row($0) }
             }
+            .themedRow(themes.theme)
         }
+        .tint(themes.accent)
+        .themedList(themes.theme)
+        .themedNavBar(themes.theme)
         .navigationTitle("Theme")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { accentDraft = themes.customAccent ?? themes.baseTheme.accent }
@@ -373,13 +400,94 @@ struct ThemePickerView: View {
                 .frame(width: 46, height: 46)
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.separator, lineWidth: 1))
 
-                Text(theme.name)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(theme.name)
+                    // A strip of the theme's own colours, so a theme can be
+                    // judged before picking it.
+                    HStack(spacing: 3) {
+                        ForEach(Array([theme.surface, theme.textPrimary, theme.accent, theme.accentSecondary]
+                                        .enumerated()), id: \.offset) { _, c in
+                            Capsule().fill(c).frame(width: 14, height: 4)
+                                .overlay(Capsule().stroke(theme.separator, lineWidth: 0.5))
+                        }
+                    }
+                }
                 Spacer()
                 if settings.themeID == theme.id {
                     Image(systemName: "checkmark").foregroundStyle(themes.accent)
                 }
             }
         }
-        .foregroundStyle(.primary)
+        .foregroundStyle(themes.theme.textPrimary)
+    }
+}
+
+// MARK: - Visual effects
+
+struct VisualEffectsView: View {
+    @EnvironmentObject private var themes: ThemeManager
+    @EnvironmentObject private var settings: AppSettings
+
+    var body: some View {
+        List {
+            Section {
+                Picker("Shape", selection: $settings.artworkShape) {
+                    ForEach(ArtworkShape.allCases) { shape in
+                        Label(shape.label, systemImage: shape.symbol).tag(shape)
+                    }
+                }
+                Toggle("Breathing artwork", isOn: $settings.breathingArtwork)
+                Toggle("Coloured glow", isOn: $settings.artworkGlow)
+            } header: {
+                Text("Now Playing Artwork")
+            } footer: {
+                Text("Breathing shrinks the cover slightly when paused. Glow swaps the dark shadow for one in the album's colour.")
+            }
+            .themedRow(themes.theme)
+
+            Section {
+                Toggle("Blurred art background", isOn: $settings.blurredArtBackground)
+                Toggle("Ambient colour glow", isOn: $settings.ambientBackground)
+                if settings.ambientBackground && settings.batterySaverActive {
+                    Label("Battery Saver is on — the glow stays still", systemImage: "battery.100percent.bolt")
+                        .font(.system(size: 13))
+                        .foregroundStyle(themes.accent)
+                }
+            } header: {
+                Text("Background")
+            } footer: {
+                Text("Ambient glow slowly drifts soft album colours behind the player while music plays. It stops moving when paused or under Battery Saver.")
+            }
+            .themedRow(themes.theme)
+
+            Section {
+                Toggle("Spectrum visualizer", isOn: $settings.showVisualizer)
+                if settings.showVisualizer {
+                    Picker("Style", selection: $settings.visualizerStyle) {
+                        ForEach(VisualizerStyle.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                }
+            } header: {
+                Text("Visualizer")
+            } footer: {
+                Text("Bars, bars mirrored from the centre, or a smooth wave. Hidden automatically under Battery Saver.")
+            }
+            .themedRow(themes.theme)
+
+            Section {
+                Toggle("Glass controls", isOn: $settings.glassControls)
+            } header: {
+                Text("Controls")
+            } footer: {
+                Text("Frosted-glass panels behind the player buttons and the mini player. Uses a little more battery than the plain look.")
+            }
+            .themedRow(themes.theme)
+        }
+        .tint(themes.accent)
+        .themedList(themes.theme)
+        .themedNavBar(themes.theme)
+        .navigationTitle("Visual Effects")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
