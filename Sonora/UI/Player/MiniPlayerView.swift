@@ -9,6 +9,7 @@ struct MiniPlayerView: View {
 
     @EnvironmentObject private var player: PlaybackController
     @EnvironmentObject private var themes: ThemeManager
+    @EnvironmentObject private var settings: AppSettings
     @Binding var showFullPlayer: Bool
 
     var body: some View {
@@ -52,7 +53,7 @@ struct MiniPlayerView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
         }
-        .background(.ultraThinMaterial)
+        .background { panel }
         .overlay(alignment: .top) {
             Rectangle().fill(themes.theme.separator).frame(height: 0.5)
         }
@@ -69,12 +70,32 @@ struct MiniPlayerView: View {
     }
 }
 
+extension MiniPlayerView {
+    /// Solid theme surface by default, so it matches the (themed) tab bar
+    /// right under it. "Glass controls" swaps in a frosted panel tinted with
+    /// the theme, which still reads correctly on light and dark themes.
+    @ViewBuilder
+    fileprivate var panel: some View {
+        if settings.glassControls {
+            ZStack {
+                Rectangle().fill(.ultraThinMaterial)
+                Rectangle().fill(themes.theme.surface.opacity(0.35))
+                LinearGradient(colors: [themes.playerAccent.opacity(0.16), .clear],
+                               startPoint: .leading, endPoint: .trailing)
+            }
+        } else {
+            themes.theme.surface
+        }
+    }
+}
+
 private struct MiniProgress: View {
     @ObservedObject var clock: PlaybackClock
     @EnvironmentObject private var player: PlaybackController
 
     var body: some View {
         let length = player.trackLength
-        SlimProgressBar(fraction: length > 0 ? player.elapsed(at: clock.position) / length : 0)
+        SlimProgressBar(fraction: length > 0 ? player.elapsed(at: clock.position) / length : 0,
+                        usePlayerAccent: true)
     }
 }

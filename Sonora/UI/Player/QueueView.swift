@@ -35,6 +35,7 @@ struct QueueView: View {
                                         .onTapGesture { player.jump(to: index); Haptics.tap() }
                                         .listRowBackground(index == player.currentIndex
                                                            ? themes.accent.opacity(0.14) : Color.clear)
+                                        .listRowSeparatorTint(themes.theme.separator)
                                         .id(index)
                                 }
                             }
@@ -49,6 +50,7 @@ struct QueueView: View {
                         }
                     }
                     .listStyle(.plain)
+                    .themedList(themes.theme)
                     .environment(\.editMode, $editMode)
                     .task {
                         // Open with the playing song in view. A short wait lets
@@ -82,6 +84,8 @@ struct QueueView: View {
                     }
                 }
             }
+            .background(themes.theme.background.ignoresSafeArea())
+            .themedNavBar(themes.theme)
             .navigationTitle("Play Queue")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -112,11 +116,13 @@ struct QueueView: View {
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
+                    .tint(themes.accent)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(editMode == .active ? "Done" : "Edit") {
                         withAnimation { editMode = editMode == .active ? .inactive : .active }
                     }
+                    .tint(themes.accent)
                 }
             }
         }

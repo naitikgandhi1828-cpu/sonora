@@ -36,22 +36,34 @@ struct NowPlayingView: View {
             content
         }
         .preferredColorScheme(themes.colorScheme)
-        .sheet(isPresented: $showQueue) { QueueView().presentationDetents([.medium, .large]) }
-        .sheet(isPresented: $showDSP) { DSPHomeView().presentationDetents([.large]) }
-        .sheet(isPresented: $showSleep) { SleepTimerView().presentationDetents([.medium]) }
+        .fontDesign(settings.fontStyle.design)
+        .sheet(isPresented: $showQueue) {
+            QueueView().presentationDetents([.medium, .large]).themedSheet(themes)
+        }
+        .sheet(isPresented: $showDSP) {
+            DSPHomeView().presentationDetents([.large]).themedSheet(themes)
+        }
+        .sheet(isPresented: $showSleep) {
+            SleepTimerView().presentationDetents([.medium]).themedSheet(themes)
+        }
         .sheet(isPresented: $showInfo) {
-            if let track { TrackInfoView(track: track).presentationDetents([.medium, .large]) }
+            if let track {
+                TrackInfoView(track: track).presentationDetents([.medium, .large]).themedSheet(themes)
+            }
         }
         .sheet(item: $editTarget) { target in
-            TagEditorView(trackIDs: target.trackIDs)
+            TagEditorView(trackIDs: target.trackIDs).themedSheet(themes)
         }
         .sheet(isPresented: $showLyrics) {
-            LyricsView().presentationDetents([.medium, .large])
+            LyricsView().presentationDetents([.medium, .large]).themedSheet(themes)
         }
-        .onChange(of: player.currentArtwork) { _, image in
-            themes.updateArtworkAccent(from: image)
-        }
-        .onAppear { themes.updateArtworkAccent(from: player.currentArtwork) }
+        // The album tint itself is kept current by RootView, which is alive
+        // for the whole session (it used to be worked out only here).
+    }
+
+    /// Glows drift only while music plays, and never under Battery Saver.
+    private var ambientDrifts: Bool {
+        player.isPlaying && !settings.batterySaverActive
     }
 
     // MARK: Background
@@ -84,7 +96,18 @@ struct NowPlayingView: View {
                 .transition(.opacity)
             }
 
-            LinearGradient(colors: [themes.accent.opacity(themes.theme.isDark ? 0.22 : 0.14),
+            // Optional drifting colour glows from the cover. Core Animation
+            // runs the drift; it freezes when paused or under Battery Saver.
+            if settings.ambientBackground {
+                AmbientGlowView(colours: themes.ambientColours,
+                                drifting: ambientDrifts,
+                                isDarkTheme: themes.theme.isDark)
+                    .opacity(settings.blurredArtBackground && player.currentArtwork != nil ? 0.8 : 1)
+                    .ignoresSafeArea()
+                    .transition(.opacity)
+            }
+
+            LinearGradient(colors: [themes.playerAccent.opacity(themes.theme.isDark ? 0.22 : 0.14),
                                     .clear],
                            startPoint: .top, endPoint: .center)
                 .ignoresSafeArea()
@@ -94,7 +117,8 @@ struct NowPlayingView: View {
                 .ignoresSafeArea()
         }
         .animation(.easeInOut(duration: 0.45), value: player.currentArtwork)
-        .animation(.easeInOut(duration: 0.45), value: themes.accent)
+        .animation(.easeInOut(duration: 0.45), value: themes.playerAccent)
+        .animation(.easeInOut(duration: 0.45), value: settings.ambientBackground)
     }
 
     // MARK: Content
@@ -150,10 +174,15 @@ struct NowPlayingView: View {
                 Button { showQueue = true } label: { Label("Play Queue", systemImage: "list.bullet") }
                 Button { showDSP = true } label: { Label("Equalizer & DSP", systemImage: "slider.horizontal.3") }
                 Button { showSleep = true } label: { Label("Sleep Timer", systemImage: "moon.zzz") }
-                Toggle(isOn: Binding(get: { settings.vinylArtwork },
-                                     set: { settings.vinylArtwork = $0 })) {
-                    Label("Vinyl Artwork", systemImage: "record.circle")
+                Picker(selection: Binding(get: { settings.artworkShape },
+                                          set: { settings.artworkShape = $0; Haptics.select() })) {
+                    ForEach(ArtworkShape.allCases) { shape in
+                        Label(shape.label, systemImage: shape.symbol).tag(shape)
+                    }
+                } label: {
+                    Label("Artwork Style", systemImage: "photo.artframe")
                 }
+                .pickerStyle(.menu)
                 Divider()
                 if let track {
                     Menu("Rate") {
@@ -192,12 +221,18 @@ struct NowPlayingView: View {
                              onPrevious: { player.previous(allowRestart: false) },
                              onNext: { player.next(userInitiated: true) },
                              onSwipeDown: { showQueue = true },
-                             vinyl: settings.vinylArtwork,
+                             shape: settings.artworkShape,
                              spinning: player.isPlaying,
-                             labelColor: UIColor(themes.accent))
+                             labelColor: UIColor(themes.playerAccent),
+                             glowColor: settings.artworkGlow ? themes.playerAccent : nil)
+                    // Apple-Music-style: full size while playing, settles
+                    // back a little when paused. A one-off spring, so it
+                    // costs nothing between state changes.
+                    .scaleEffect(breathingScale)
+                    .animation(.spring(response: 0.5, dampingFraction: 0.72), value: player.isPlaying)
 
                 if settings.visualizerAllowed && player.isPlaying {
-                    SpectrumView(meters: player.meters)
+                    SpectrumView(meters: player.meters, style: settings.visualizerStyle)
                         .frame(height: side * 0.16)
                         .padding(.horizontal, side * 0.08)
                         .frame(maxHeight: .infinity, alignment: .bottom)
@@ -213,6 +248,11 @@ struct NowPlayingView: View {
         .aspectRatio(1, contentMode: .fit)
         .frame(maxHeight: 380)
         .onTapGesture(count: 2) { player.togglePlayPause(); Haptics.tap() }
+    }
+
+    private var breathingScale: CGFloat {
+        guard settings.breathingArtwork, track != nil, !player.isPlaying else { return 1 }
+        return 0.92
     }
 
     private var titleBlock: some View {
@@ -268,7 +308,7 @@ struct NowPlayingView: View {
                 Image(systemName: settings.shuffleMode == .albums ? "shuffle.circle" : "shuffle")
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(settings.shuffleMode == .off
-                                     ? themes.theme.textSecondary : themes.accent)
+                                     ? themes.theme.textSecondary : themes.playerAccent)
             }
             Spacer()
             Button { player.previous(); Haptics.tap() } label: {
@@ -277,13 +317,15 @@ struct NowPlayingView: View {
             Spacer()
             Button { player.togglePlayPause(); Haptics.tap() } label: {
                 ZStack {
-                    Circle().fill(themes.accent).frame(width: 68, height: 68)
+                    Circle().fill(themes.playerAccent).frame(width: 68, height: 68)
                     Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 27))
-                        .foregroundStyle(.white)
+                        // White on the accent, except on a very pale album
+                        // tint where white would all but disappear.
+                        .foregroundStyle(themes.playerAccent.isLight ? Color.black.opacity(0.85) : Color.white)
                         .offset(x: player.isPlaying ? 0 : 2)
                 }
-                .shadow(color: themes.accent.opacity(0.4), radius: 14, y: 6)
+                .shadow(color: themes.playerAccent.opacity(0.4), radius: 14, y: 6)
             }
             Spacer()
             Button { player.next(userInitiated: true); Haptics.tap() } label: {
@@ -294,19 +336,34 @@ struct NowPlayingView: View {
                 Image(systemName: settings.repeatMode.symbol)
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(settings.repeatMode == .off
-                                     ? themes.theme.textSecondary : themes.accent)
+                                     ? themes.theme.textSecondary : themes.playerAccent)
             }
         }
         .foregroundStyle(themes.theme.textPrimary)
-        .padding(.vertical, 14)
+        .padding(.vertical, settings.glassControls ? 10 : 14)
+        .padding(.horizontal, settings.glassControls ? 16 : 0)
+        .background {
+            if settings.glassControls {
+                RoundedRectangle(cornerRadius: 30, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay(RoundedRectangle(cornerRadius: 30, style: .continuous)
+                        .stroke(themes.theme.textPrimary.opacity(0.08), lineWidth: 0.5))
+            }
+        }
+        .padding(.vertical, settings.glassControls ? 6 : 0)
     }
 
     private var secondaryRow: some View {
         secondaryButtons
             .padding(.vertical, 10)
             .padding(.horizontal, 20)
-            .background(themes.theme.surface.opacity(0.55),
-                        in: Capsule(style: .continuous))
+            .background {
+                if settings.glassControls {
+                    Capsule(style: .continuous).fill(.ultraThinMaterial)
+                } else {
+                    Capsule(style: .continuous).fill(themes.theme.surface.opacity(0.55))
+                }
+            }
             .overlay(Capsule(style: .continuous)
                 .stroke(themes.theme.separator.opacity(0.5), lineWidth: 0.5))
     }
@@ -322,12 +379,12 @@ struct NowPlayingView: View {
             Button { showDSP = true } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 18))
-                    .foregroundStyle(player.dsp.isActive ? themes.accent : themes.theme.textSecondary)
+                    .foregroundStyle(player.dsp.isActive ? themes.playerAccent : themes.theme.textSecondary)
             }
             Button { showSleep = true } label: {
                 Image(systemName: player.sleepTimer.isActive ? "moon.zzz.fill" : "moon.zzz")
                     .font(.system(size: 18))
-                    .foregroundStyle(player.sleepTimer.isActive ? themes.accent : themes.theme.textSecondary)
+                    .foregroundStyle(player.sleepTimer.isActive ? themes.playerAccent : themes.theme.textSecondary)
             }
             Button { showQueue = true } label: {
                 Image(systemName: "list.bullet").font(.system(size: 18))
@@ -391,10 +448,14 @@ private struct ArtworkPager: View {
     let onNext: () -> Void
     /// Pulling the artwork down opens the queue.
     var onSwipeDown: () -> Void = {}
-    /// Draw the covers as vinyl records; the centre one turns while playing.
-    var vinyl: Bool = false
+    /// Rounded, square, circle or vinyl record (the centre record turns
+    /// while playing).
+    var shape: ArtworkShape = .rounded
     var spinning: Bool = false
     var labelColor: UIColor = .systemOrange
+    /// Album colour for a coloured glow under the cover; nil for the plain
+    /// dark shadow.
+    var glowColor: Color? = nil
 
     @State private var dragX: CGFloat = 0
     /// Vertical follow-the-finger offset for the swipe-down-to-queue gesture.
@@ -435,21 +496,46 @@ private struct ArtworkPager: View {
         .simultaneousGesture(drag)
     }
 
+    private var shadowColor: Color {
+        glowColor?.opacity(0.6) ?? .black.opacity(0.45)
+    }
+
     @ViewBuilder
     private func cover(_ key: String?, centre: Bool) -> some View {
-        if vinyl {
-            // The record draws its own round shadow.
+        switch shape {
+        case .vinyl:
+            // The record draws its own round shadow; the glow is a soft
+            // gradient disc behind it (no blur filter needed).
             VinylDiscView(artworkKey: key,
                           spinning: centre && spinning,
                           labelColor: labelColor)
                 .frame(width: side, height: side)
-        } else {
+                .background {
+                    if centre, let glowColor {
+                        Circle()
+                            .fill(RadialGradient(colors: [glowColor.opacity(0.55), glowColor.opacity(0)],
+                                                 center: .center,
+                                                 startRadius: side * 0.36,
+                                                 endRadius: side * 0.66))
+                            .frame(width: side * 1.32, height: side * 1.32)
+                            .allowsHitTesting(false)
+                    }
+                }
+        case .circle:
             ArtworkView(key: key,
                         size: side,
-                        cornerRadius: side * 0.055,
+                        cornerRadius: side / 2,
                         useThumbnail: false,
                         fallbackSymbol: "music.quarternote.3")
-                .shadow(color: .black.opacity(0.45), radius: 26, y: 14)
+                .clipShape(Circle())
+                .shadow(color: shadowColor, radius: glowColor == nil ? 26 : 34, y: glowColor == nil ? 14 : 8)
+        case .square, .rounded:
+            ArtworkView(key: key,
+                        size: side,
+                        cornerRadius: shape == .square ? 2 : side * 0.055,
+                        useThumbnail: false,
+                        fallbackSymbol: "music.quarternote.3")
+                .shadow(color: shadowColor, radius: glowColor == nil ? 26 : 34, y: glowColor == nil ? 14 : 8)
         }
     }
 
@@ -542,6 +628,7 @@ struct TrackInfoView: View {
                         }
                     }
                 }
+                .themedRow(themes.theme)
                 Section("Tags") {
                     row("Album Artist", track.effectiveAlbumArtist)
                     row("Genre", track.genre.isEmpty ? "—" : track.genre)
@@ -553,6 +640,7 @@ struct TrackInfoView: View {
                     row("Disc", track.discNumber.map(String.init) ?? "—")
                     if !track.comment.isEmpty { row("Comment", track.comment) }
                 }
+                .themedRow(themes.theme)
                 Section("Audio") {
                     row("Format", track.fileExtension.uppercased())
                     row("Codec", track.codec.isEmpty ? "—" : track.codec)
@@ -566,11 +654,13 @@ struct TrackInfoView: View {
                             "\((track.cueStart ?? 0).timecode) – \((track.cueEnd ?? 0).timecode)")
                     }
                 }
+                .themedRow(themes.theme)
                 Section("Replay Gain") {
                     row("Track Gain", track.replayGainTrack.map { String(format: "%.2f dB", $0) } ?? "Not measured")
                     row("Album Gain", track.replayGainAlbum.map { String(format: "%.2f dB", $0) } ?? "Not measured")
                     row("Peak", track.peakTrack.map { String(format: "%.4f", $0) } ?? "—")
                 }
+                .themedRow(themes.theme)
                 Section("Library") {
                     row("Plays", "\(track.playCount)")
                     row("Rating", track.rating > 0 ? String(repeating: "★", count: track.rating) : "—")
@@ -578,7 +668,10 @@ struct TrackInfoView: View {
                     row("Size", track.fileSize.byteSize)
                     row("Path", track.relativePath)
                 }
+                .themedRow(themes.theme)
             }
+            .themedList(themes.theme)
+            .themedNavBar(themes.theme)
             .navigationTitle("Track Info")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -590,16 +683,17 @@ struct TrackInfoView: View {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }
             .sheet(item: $editTarget) { target in
-                TagEditorView(trackIDs: target.trackIDs)
+                TagEditorView(trackIDs: target.trackIDs).themedSheet(themes)
             }
         }
     }
 
     private func row(_ label: String, _ value: String) -> some View {
         HStack(alignment: .top) {
-            Text(label).foregroundStyle(.secondary)
+            Text(label).foregroundStyle(themes.theme.textSecondary)
             Spacer(minLength: 12)
             Text(value)
+                .foregroundStyle(themes.theme.textPrimary)
                 .multilineTextAlignment(.trailing)
                 .textSelection(.enabled)
         }
@@ -649,7 +743,7 @@ private struct SeekSection: View {
                     ), in: 0...max(length, 0.01), onEditingChanged: { editing in
                         if editing { player.beginScrub() } else { player.endScrub(at: player.position) }
                     })
-                    .tint(themes.accent)
+                    .tint(themes.playerAccent)
                     .frame(height: 52)
                 }
             }

@@ -65,7 +65,7 @@ struct WaveformSeekBar: View {
                     WaveformLayer(waveform: waveform,
                                   color: themes.theme.textSecondary.opacity(0.30))
                         .equatable()
-                    WaveformLayer(waveform: waveform, color: themes.accent)
+                    WaveformLayer(waveform: waveform, color: themes.playerAccent)
                         .equatable()
                         .mask(alignment: .leading) {
                             Rectangle().frame(width: max(0, width * fraction))
@@ -76,7 +76,7 @@ struct WaveformSeekBar: View {
                         .frame(height: 5)
                         .frame(maxHeight: .infinity, alignment: .center)
                     Capsule()
-                        .fill(themes.accent)
+                        .fill(themes.playerAccent)
                         .frame(width: width * fraction, height: 5)
                         .frame(maxHeight: .infinity, alignment: .center)
                 }
@@ -181,6 +181,8 @@ private struct WaveformLayer: View, Equatable {
 struct SlimProgressBar: View {
     let fraction: Double
     var height: CGFloat = 2
+    /// Follow the album-art tint (mini player) instead of the theme accent.
+    var usePlayerAccent: Bool = false
 
     @EnvironmentObject private var themes: ThemeManager
 
@@ -194,7 +196,7 @@ struct SlimProgressBar: View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
                 Rectangle().fill(themes.theme.textSecondary.opacity(0.2))
-                Rectangle().fill(themes.accent)
+                Rectangle().fill(usePlayerAccent ? themes.playerAccent : themes.accent)
                     .frame(width: max(0, geo.size.width * clampedFraction))
             }
         }
@@ -217,26 +219,73 @@ final class MeterState: ObservableObject {
 /// Fed ~15 times a second, and only while this view is on screen.
 struct SpectrumView: View {
     @ObservedObject var meters: MeterState
+    var style: VisualizerStyle = .bars
 
     @EnvironmentObject private var themes: ThemeManager
 
     var body: some View {
-        let accent = themes.accent
+        let accent = themes.playerAccent
         let levels = meters.levels
+        let style = style
         Canvas { context, size in
             let count = max(1, levels.count)
-            let slot = size.width / CGFloat(count)
-            let barWidth = slot * 0.7
-            for i in 0..<levels.count {
-                let level = Double(max(0, min(1, levels[i])))
-                let shaped = pow(level, 0.6)
-                let h = max(2, size.height * CGFloat(shaped))
-                let rect = CGRect(x: CGFloat(i) * slot + (slot - barWidth) / 2,
-                                  y: size.height - h,
-                                  width: barWidth,
-                                  height: h)
-                context.fill(Path(roundedRect: rect, cornerRadius: barWidth / 2),
-                             with: .color(accent.opacity(0.35 + 0.65 * shaped)))
+            let shaped: [Double] = levels.map { pow(Double(max(0, min(1, $0))), 0.6) }
+            switch style {
+            case .bars:
+                let slot = size.width / CGFloat(count)
+                let barWidth = slot * 0.7
+                for i in 0..<shaped.count {
+                    let h = max(2, size.height * CGFloat(shaped[i]))
+                    let rect = CGRect(x: CGFloat(i) * slot + (slot - barWidth) / 2,
+                                      y: size.height - h,
+                                      width: barWidth,
+                                      height: h)
+                    context.fill(Path(roundedRect: rect, cornerRadius: barWidth / 2),
+                                 with: .color(accent.opacity(0.35 + 0.65 * shaped[i])))
+                }
+
+            case .mirror:
+                // Bars grow up and down from the middle line.
+                let slot = size.width / CGFloat(count)
+                let barWidth = slot * 0.62
+                let mid = size.height / 2
+                for i in 0..<shaped.count {
+                    let h = max(2, size.height * CGFloat(shaped[i]))
+                    let rect = CGRect(x: CGFloat(i) * slot + (slot - barWidth) / 2,
+                                      y: mid - h / 2,
+                                      width: barWidth,
+                                      height: h)
+                    context.fill(Path(roundedRect: rect, cornerRadius: barWidth / 2),
+                                 with: .color(accent.opacity(0.35 + 0.65 * shaped[i])))
+                }
+
+            case .wave:
+                // One smooth curve through the levels, filled underneath.
+                guard shaped.count > 1 else { return }
+                let step = size.width / CGFloat(shaped.count - 1)
+                let points: [CGPoint] = shaped.enumerated().map { i, v in
+                    CGPoint(x: CGFloat(i) * step,
+                            y: size.height - max(2, size.height * CGFloat(v) * 0.92))
+                }
+                var line = Path()
+                line.move(to: points[0])
+                for i in 1..<points.count {
+                    let a = points[i - 1], b = points[i]
+                    let midX = (a.x + b.x) / 2
+                    line.addCurve(to: b,
+                                  control1: CGPoint(x: midX, y: a.y),
+                                  control2: CGPoint(x: midX, y: b.y))
+                }
+                var fill = line
+                fill.addLine(to: CGPoint(x: size.width, y: size.height))
+                fill.addLine(to: CGPoint(x: 0, y: size.height))
+                fill.closeSubpath()
+                context.fill(fill, with: .linearGradient(
+                    Gradient(colors: [accent.opacity(0.45), accent.opacity(0.0)]),
+                    startPoint: CGPoint(x: 0, y: 0),
+                    endPoint: CGPoint(x: 0, y: size.height)))
+                context.stroke(line, with: .color(accent),
+                               style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
             }
         }
     }
