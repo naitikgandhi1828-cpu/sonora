@@ -32,7 +32,9 @@ struct LibraryHomeView: View {
                     content
                 }
             }
-            .background(themes.theme.background)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(themes.theme.background.ignoresSafeArea())
+            .themedNavBar(themes.theme)
             .navigationTitle("Library")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {

@@ -60,6 +60,7 @@ struct SearchView: View {
                                         }
                                     }
                                 }
+                                .themedPlainRow(themes.theme)
                             }
                         }
                         if scope == .all || scope == .albums, !albumResults.isEmpty {
@@ -76,6 +77,7 @@ struct SearchView: View {
                                         }
                                     }
                                 }
+                                .themedPlainRow(themes.theme)
                             }
                         }
                         if scope == .all || scope == .tracks, !results.isEmpty {
@@ -93,13 +95,17 @@ struct SearchView: View {
                                         }
                                         .trackContextMenu(track: track)
                                 }
+                                .themedPlainRow(themes.theme)
                             }
                         }
                     }
                     .listStyle(.plain)
+                    .themedList(themes.theme)
                 }
             }
-            .background(themes.theme.background)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(themes.theme.background.ignoresSafeArea())
+            .themedNavBar(themes.theme)
             .navigationTitle("Search")
             .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Songs, albums, artists")
             .toolbar {

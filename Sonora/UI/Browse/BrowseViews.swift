@@ -62,6 +62,7 @@ struct FolderBrowserView: View {
                         }
                     }
                 }
+                .themedRow(themes.theme)
             }
 
             if !node.trackIDs.isEmpty {
@@ -82,9 +83,12 @@ struct FolderBrowserView: View {
                             .trackContextMenu(track: track)
                     }
                 }
+                .themedRow(themes.theme)
             }
         }
         .listStyle(.insetGrouped)
+        .themedList(themes.theme)
+        .themedNavBar(themes.theme)
         .confirmationDialog("Remove “\(folderToRemove?.displayName ?? "")” from Sonora?",
                             isPresented: Binding(get: { folderToRemove != nil },
                                                  set: { if !$0 { folderToRemove = nil } }),
@@ -180,11 +184,14 @@ struct AlbumsView: View {
                             }
                         }
                     }
+                    .themedPlainRow(themes.theme)
                 }
                 .listStyle(.plain)
+                .themedList(themes.theme)
             }
         }
-        .background(themes.theme.background)
+        .background(themes.theme.background.ignoresSafeArea())
+        .themedNavBar(themes.theme)
         .searchable(text: $query, prompt: "Search albums")
         .navigationTitle("Albums")
         .navigationBarTitleDisplayMode(.inline)
@@ -244,7 +251,7 @@ struct AlbumDetailView: View {
                                 .font(.system(size: 14, weight: .semibold))
                                 .frame(maxWidth: .infinity).padding(.vertical, 11)
                                 .background(themes.accent, in: RoundedRectangle(cornerRadius: 10))
-                                .foregroundStyle(.white)
+                                .foregroundStyle(themes.accent.isLight ? Color.black : Color.white)
                         }
                         Button {
                             player.play(trackIDs: tracks.map(\.id).shuffled(), sourceName: album.title)
@@ -277,9 +284,12 @@ struct AlbumDetailView: View {
                         }
                         .trackContextMenu(track: track)
                 }
+                .themedPlainRow(themes.theme)
             }
         }
         .listStyle(.plain)
+        .themedList(themes.theme)
+        .themedNavBar(themes.theme)
         .navigationTitle(headerTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -295,7 +305,7 @@ struct AlbumDetailView: View {
             }
         }
         .sheet(item: $editTarget) { target in
-            TagEditorView(trackIDs: target.trackIDs)
+            TagEditorView(trackIDs: target.trackIDs).themedSheet(themes)
         }
     }
 }
@@ -327,8 +337,11 @@ struct ArtistsView: View {
                     }
                 }
             }
+            .themedPlainRow(themes.theme)
         }
         .listStyle(.plain)
+        .themedList(themes.theme)
+        .themedNavBar(themes.theme)
         .searchable(text: $query, prompt: "Search artists")
         .navigationTitle("Artists")
         .navigationBarTitleDisplayMode(.inline)
@@ -354,8 +367,11 @@ struct GenresView: View {
                     }
                 }
             }
+            .themedPlainRow(themes.theme)
         }
         .listStyle(.plain)
+        .themedList(themes.theme)
+        .themedNavBar(themes.theme)
         .navigationTitle("Genres")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -405,11 +421,16 @@ struct PlaylistsView: View {
                                 library.deletePlaylist(playlist.id)
                             } label: { Label("Delete", systemImage: "trash") }
                         }
+                        .themedPlainRow(themes.theme)
                     }
                 }
                 .listStyle(.plain)
+                .themedList(themes.theme)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(themes.theme.background.ignoresSafeArea())
+        .themedNavBar(themes.theme)
         .navigationTitle("Playlists")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -505,6 +526,8 @@ struct TrackListView: View {
             }
         }
         .listStyle(.plain)
+        .themedList(themes.theme)
+        .themedNavBar(themes.theme)
         .searchable(text: $query, prompt: "Filter")
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
@@ -580,6 +603,7 @@ struct TrackListView: View {
                     Haptics.tap()
                 }
                 .trackContextMenu(track: track)
+                .themedPlainRow(themes.theme)
         }
         .onDelete(perform: deleteHandler(items))
         .onMove(perform: moveHandler(items))
@@ -592,6 +616,7 @@ private struct TrackContextMenu: ViewModifier {
     let track: Track
     @EnvironmentObject private var library: MediaLibrary
     @EnvironmentObject private var player: PlaybackController
+    @EnvironmentObject private var themes: ThemeManager
     @State private var showInfo = false
     @State private var editTarget: TagEditTarget?
 
@@ -624,10 +649,10 @@ private struct TrackContextMenu: ViewModifier {
                 } label: { Label("Edit Tags…", systemImage: "tag") }
             }
             .sheet(isPresented: $showInfo) {
-                TrackInfoView(track: track).presentationDetents([.medium, .large])
+                TrackInfoView(track: track).presentationDetents([.medium, .large]).themedSheet(themes)
             }
             .sheet(item: $editTarget) { target in
-                TagEditorView(trackIDs: target.trackIDs)
+                TagEditorView(trackIDs: target.trackIDs).themedSheet(themes)
             }
     }
 }
