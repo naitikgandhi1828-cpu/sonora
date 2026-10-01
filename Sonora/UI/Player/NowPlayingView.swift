@@ -150,6 +150,10 @@ struct NowPlayingView: View {
                 Button { showQueue = true } label: { Label("Play Queue", systemImage: "list.bullet") }
                 Button { showDSP = true } label: { Label("Equalizer & DSP", systemImage: "slider.horizontal.3") }
                 Button { showSleep = true } label: { Label("Sleep Timer", systemImage: "moon.zzz") }
+                Toggle(isOn: Binding(get: { settings.vinylArtwork },
+                                     set: { settings.vinylArtwork = $0 })) {
+                    Label("Vinyl Artwork", systemImage: "record.circle")
+                }
                 Divider()
                 if let track {
                     Menu("Rate") {
@@ -187,7 +191,10 @@ struct NowPlayingView: View {
                              hasNext: player.canGoNext,
                              onPrevious: { player.previous(allowRestart: false) },
                              onNext: { player.next(userInitiated: true) },
-                             onSwipeDown: { showQueue = true })
+                             onSwipeDown: { showQueue = true },
+                             vinyl: settings.vinylArtwork,
+                             spinning: player.isPlaying,
+                             labelColor: UIColor(themes.accent))
 
                 if settings.visualizerAllowed && player.isPlaying {
                     SpectrumView(meters: player.meters)
@@ -384,6 +391,10 @@ private struct ArtworkPager: View {
     let onNext: () -> Void
     /// Pulling the artwork down opens the queue.
     var onSwipeDown: () -> Void = {}
+    /// Draw the covers as vinyl records; the centre one turns while playing.
+    var vinyl: Bool = false
+    var spinning: Bool = false
+    var labelColor: UIColor = .systemOrange
 
     @State private var dragX: CGFloat = 0
     /// Vertical follow-the-finger offset for the swipe-down-to-queue gesture.
@@ -409,9 +420,9 @@ private struct ArtworkPager: View {
 
     var body: some View {
         HStack(spacing: gap) {
-            cover(previousKey).opacity(neighbourOpacity)
-            cover(currentKey).opacity(centreOpacity)
-            cover(nextKey).opacity(neighbourOpacity)
+            cover(previousKey, centre: false).opacity(neighbourOpacity)
+            cover(currentKey, centre: true).opacity(centreOpacity)
+            cover(nextKey, centre: false).opacity(neighbourOpacity)
         }
         .offset(x: dragX)
         // The strip is three covers wide; this frame crops the view back to one
@@ -424,13 +435,22 @@ private struct ArtworkPager: View {
         .simultaneousGesture(drag)
     }
 
-    private func cover(_ key: String?) -> some View {
-        ArtworkView(key: key,
-                    size: side,
-                    cornerRadius: side * 0.055,
-                    useThumbnail: false,
-                    fallbackSymbol: "music.quarternote.3")
-            .shadow(color: .black.opacity(0.45), radius: 26, y: 14)
+    @ViewBuilder
+    private func cover(_ key: String?, centre: Bool) -> some View {
+        if vinyl {
+            // The record draws its own round shadow.
+            VinylDiscView(artworkKey: key,
+                          spinning: centre && spinning,
+                          labelColor: labelColor)
+                .frame(width: side, height: side)
+        } else {
+            ArtworkView(key: key,
+                        size: side,
+                        cornerRadius: side * 0.055,
+                        useThumbnail: false,
+                        fallbackSymbol: "music.quarternote.3")
+                .shadow(color: .black.opacity(0.45), radius: 26, y: 14)
+        }
     }
 
     private var drag: some Gesture {

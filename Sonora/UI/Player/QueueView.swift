@@ -23,6 +23,7 @@ struct QueueView: View {
                                    title: "Queue is empty",
                                    message: "Play an album, folder or playlist to fill the queue.")
                 } else {
+                    ScrollViewReader { proxy in
                     List {
                         Section {
                             ForEach(Array(player.queue.enumerated()), id: \.offset) { index, id in
@@ -32,6 +33,9 @@ struct QueueView: View {
                                              isPlaying: index == player.currentIndex && player.isPlaying)
                                         .contentShape(Rectangle())
                                         .onTapGesture { player.jump(to: index); Haptics.tap() }
+                                        .listRowBackground(index == player.currentIndex
+                                                           ? themes.accent.opacity(0.14) : Color.clear)
+                                        .id(index)
                                 }
                             }
                             .onDelete { player.removeFromQueue(at: $0) }
@@ -46,6 +50,36 @@ struct QueueView: View {
                     }
                     .listStyle(.plain)
                     .environment(\.editMode, $editMode)
+                    .task {
+                        // Open with the playing song in view. A short wait lets
+                        // the sheet lay the list out first; scrolling before
+                        // that is silently ignored.
+                        try? await Task.sleep(nanoseconds: 120_000_000)
+                        scrollToCurrent(proxy, animated: false)
+                    }
+                    .onChange(of: player.currentIndex) { _, _ in
+                        // Follow the music while the queue is open, but never
+                        // yank the list away from someone reordering it.
+                        guard editMode != .active else { return }
+                        scrollToCurrent(proxy, animated: true)
+                    }
+                    .overlay(alignment: .bottomTrailing) {
+                        if player.currentIndex >= 0 {
+                            Button {
+                                scrollToCurrent(proxy, animated: true)
+                                Haptics.tap()
+                            } label: {
+                                Label("Now Playing", systemImage: "scope")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(.ultraThinMaterial, in: Capsule())
+                            }
+                            .tint(themes.accent)
+                            .padding(16)
+                        }
+                    }
+                    }
                 }
             }
             .navigationTitle("Play Queue")
@@ -85,6 +119,18 @@ struct QueueView: View {
                     }
                 }
             }
+        }
+    }
+}
+
+extension QueueView {
+    fileprivate func scrollToCurrent(_ proxy: ScrollViewProxy, animated: Bool) {
+        let index = player.currentIndex
+        guard index >= 0, index < player.queue.count else { return }
+        if animated {
+            withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(index, anchor: .center) }
+        } else {
+            proxy.scrollTo(index, anchor: .center)
         }
     }
 }
