@@ -75,7 +75,7 @@ struct SonoraApp: App {
                 // Refresh the route only; activating here would interrupt
                 // Spotify or YouTube every time you switch to Sonora.
                 AudioSessionManager.shared.configure()
-                // Confirms a Sideloadly refresh and keeps the expiry reminders up to date.
+                // Confirms an update from the laptop and keeps the expiry reminders up to date.
                 SigningStatus.requestPermission()
                 SigningStatus.check()
             @unknown default:
