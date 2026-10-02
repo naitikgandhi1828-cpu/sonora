@@ -284,6 +284,13 @@ struct SettingsView: View {
     private var aboutSection: some View {
         Section {
             HStack { Text("Version"); Spacer(); Text(Self.appVersion).foregroundStyle(themes.theme.textSecondary) }
+            if let updated = SigningStatus.updatedAt {
+                HStack {
+                    Text("Last updated")
+                    Spacer()
+                    Text(SigningStatus.formatted(updated)).foregroundStyle(themes.theme.textSecondary)
+                }
+            }
             if let expiry = SigningStatus.expiry {
                 HStack {
                     Text("Works until")
@@ -297,7 +304,7 @@ struct SettingsView: View {
         } header: {
             Text("About")
         } footer: {
-            Text("You get a notification when Sideloadly refreshes Sonora, and reminders 2 days, 1 day and 3 hours before it expires. Sonora plays the formats iOS can decode natively: MP3, AAC/M4A, ALAC, FLAC, WAV, AIFF and CAF. Formats like Opus, WMA, APE and DSD need a bundled decoder — see the project README.")
+            Text("You get a notification when your laptop updates Sonora, and reminders 2 days, 1 day and 3 hours before it expires. Sonora plays the formats iOS can decode natively: MP3, AAC/M4A, ALAC, FLAC, WAV, AIFF and CAF. Formats like Opus, WMA, APE and DSD need a bundled decoder — see the project README.")
         }
         .themedRow(themes.theme)
     }
