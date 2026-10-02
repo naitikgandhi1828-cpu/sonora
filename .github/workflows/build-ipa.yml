@@ -13,6 +13,13 @@ on:
   push:
     branches: [ main, master, battery-saver ]
 
+# Only the newest commit on a branch gets built. Without this, several
+# uploads in a row start several builds, and an older one finishing last
+# would overwrite the "latest" IPA with a stale build.
+concurrency:
+  group: build-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     # macos-15 ships Xcode 16, which this project needs.
