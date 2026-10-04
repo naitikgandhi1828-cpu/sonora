@@ -22,6 +22,7 @@ struct NowPlayingView: View {
     @State private var showSleep = false
     @State private var showInfo = false
     @State private var showLyrics = false
+    @State private var showErrorAlert = false
     @State private var editTarget: TagEditTarget?
 
     private var track: Track? { player.currentTrack }
@@ -59,6 +60,14 @@ struct NowPlayingView: View {
         }
         // The album tint itself is kept current by RootView, which is alive
         // for the whole session (it used to be worked out only here).
+        .onChange(of: player.errorMessage) { _, message in
+            showErrorAlert = message != nil
+        }
+        .alert("Playback problem", isPresented: $showErrorAlert) {
+            Button("OK", role: .cancel) { player.dismissError() }
+        } message: {
+            Text(player.errorMessage ?? "")
+        }
     }
 
     /// Glows drift only while music plays, and never under Battery Saver.
