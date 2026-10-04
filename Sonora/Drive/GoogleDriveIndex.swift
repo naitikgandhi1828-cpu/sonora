@@ -26,6 +26,10 @@ struct DriveIndexSnapshot: Codable {
     /// Drive file id → downloaded file.
     var files: [String: DriveIndexEntry] = [:]
     var syncedFolders: [DriveSyncedFolder] = []
+    /// Drive file ids the user deleted from the iPhone but left in Drive.
+    /// Sync leaves these alone so a deleted song does not come back by
+    /// itself. Optional so an index saved by an older version still loads.
+    var ignored: [String]?
 }
 
 enum DriveIndexStore {

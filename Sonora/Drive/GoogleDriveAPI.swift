@@ -183,6 +183,58 @@ enum DriveAPI {
                          localName: localName)
     }
 
+    // MARK: Bin
+
+    /// Moves one file to the Bin in Google Drive. Google keeps it there for
+    /// 30 days, so this can be undone from Drive itself. A file that is
+    /// already gone counts as done.
+    ///
+    /// Needs the full Drive permission (`GoogleDriveConfig.fullScope`).
+    static func moveToBin(fileID: String, token: String) async throws {
+        let safeID = fileID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? fileID
+        guard var components = URLComponents(string: GoogleDriveConfig.apiBase + "/files/" + safeID) else {
+            throw DriveError.badResponse
+        }
+        components.queryItems = [
+            URLQueryItem(name: "supportsAllDrives", value: "true"),
+            URLQueryItem(name: "fields", value: "id,trashed")
+        ]
+        guard let url = components.url else { throw DriveError.badResponse }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.timeoutInterval = 30
+        request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.httpBody = Data(#"{"trashed":true}"#.utf8)
+
+        let fetched: (Data, URLResponse)
+        do {
+            fetched = try await session.data(for: request)
+        } catch let error as URLError {
+            if error.code == .cancelled { throw CancellationError() }
+            throw DriveError.fromURLError(error)
+        }
+        guard let http = fetched.1 as? HTTPURLResponse else { throw DriveError.badResponse }
+        if (200..<300).contains(http.statusCode) || http.statusCode == 404 { return }
+        if http.statusCode == 401 { throw DriveError.unauthorized }
+
+        // The general messages talk about downloading; these are the two
+        // ways a delete is refused.
+        let envelope = try? JSONDecoder().decode(ErrorEnvelope.self, from: fetched.0)
+        let reason = envelope?.error?.errors?.first?.reason ?? ""
+        let message = (envelope?.error?.message ?? "").lowercased()
+        if reason == "insufficientFilePermissions" || reason == "appNotAuthorizedToFile"
+            || message.contains("sufficient permissions for this file") {
+            throw DriveError.api("This song belongs to someone else in Google Drive, so only they can delete it.")
+        }
+        if reason == "insufficientPermissions" || message.contains("insufficient authentication scopes") {
+            throw DriveError.api("Sonora isn't allowed to delete from Google Drive yet. Switch on “Allow deleting from Drive” on the Google Drive screen.")
+        }
+        throw apiError(status: http.statusCode, body: fetched.0)
+    }
+
     // MARK: Download
 
     /// Downloads one file to `destination`, replacing whatever is there.

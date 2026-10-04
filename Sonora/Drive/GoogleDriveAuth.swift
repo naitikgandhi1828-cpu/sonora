@@ -184,7 +184,10 @@ final class GoogleDriveAuth {
     // MARK: Sign in
 
     /// Shows Google's sign-in sheet and, on success, stores the refresh token.
-    func signIn(clientPrefix prefix: String) async throws {
+    /// `fullAccess` asks for permission to change Drive files as well (used
+    /// only for moving a song to the Bin); otherwise the sign-in is read-only.
+    func signIn(clientPrefix prefix: String, fullAccess: Bool = false) async throws {
+        let wantedScope = fullAccess ? GoogleDriveConfig.fullScope : GoogleDriveConfig.scope
         let verifier = DrivePKCE.randomURLSafe(byteCount: 32)     // 43 characters
         let state = DrivePKCE.randomURLSafe(byteCount: 16)
         let clientID = GoogleDriveConfig.fullClientID(prefix: prefix)
@@ -197,7 +200,7 @@ final class GoogleDriveAuth {
             URLQueryItem(name: "client_id", value: clientID),
             URLQueryItem(name: "redirect_uri", value: redirect),
             URLQueryItem(name: "response_type", value: "code"),
-            URLQueryItem(name: "scope", value: GoogleDriveConfig.scope),
+            URLQueryItem(name: "scope", value: wantedScope),
             URLQueryItem(name: "code_challenge", value: DrivePKCE.challenge(for: verifier)),
             URLQueryItem(name: "code_challenge_method", value: "S256"),
             URLQueryItem(name: "state", value: state),
@@ -241,8 +244,17 @@ final class GoogleDriveAuth {
         }
 
         guard let token = response.accessToken, !token.isEmpty else { throw DriveError.badResponse }
-        if let granted = response.scope, !granted.contains(GoogleDriveConfig.scope) {
-            throw DriveError.signInFailed("Sonora wasn't given permission to see your Drive files. Connect again and leave the Google Drive box ticked.")
+        if let granted = response.scope {
+            // Google lists the scopes it granted, separated by spaces. Full
+            // access covers reading too.
+            let scopes = Set(granted.split(separator: " ").map(String.init))
+            let canRead = scopes.contains(GoogleDriveConfig.scope) || scopes.contains(GoogleDriveConfig.fullScope)
+            if !canRead {
+                throw DriveError.signInFailed("Sonora wasn't given permission to see your Drive files. Connect again and leave the Google Drive box ticked.")
+            }
+            if fullAccess, !scopes.contains(GoogleDriveConfig.fullScope) {
+                throw DriveError.signInFailed("Google didn't give Sonora permission to delete files. Try again and leave the Google Drive box ticked.")
+            }
         }
         guard let refresh = response.refreshToken, !refresh.isEmpty else {
             throw DriveError.signInFailed("Google didn't send a long-term sign-in. Please try again.")

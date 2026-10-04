@@ -24,7 +24,14 @@ enum GoogleDriveConfig {
     static let apiBase = "https://www.googleapis.com/drive/v3"
 
     /// Read-only: Sonora can list and download, never change or delete.
+    /// This is what Sonora asks for unless the user switches on
+    /// "Allow deleting from Drive".
     static let scope = "https://www.googleapis.com/auth/drive.readonly"
+
+    /// Full access, asked for only when the user wants "Delete Song" to
+    /// reach Google Drive as well. Sonora uses it for one thing: moving a
+    /// song to the Drive Bin.
+    static let fullScope = "https://www.googleapis.com/auth/drive"
 
     static let clientIDSuffix = ".apps.googleusercontent.com"
     static let reversedPrefix = "com.googleusercontent.apps."
@@ -45,6 +52,7 @@ enum GoogleDriveConfig {
         static let accountName = "drive.accountName"
         static let syncOnLaunch = "drive.syncOnLaunch"
         static let needsReconnect = "drive.needsReconnect"
+        static let deleteAllowed = "drive.deleteAllowed"
     }
 
     /// Accepts what the user pasted and returns just the part before

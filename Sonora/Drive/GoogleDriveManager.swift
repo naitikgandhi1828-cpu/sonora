@@ -63,6 +63,11 @@ final class GoogleDriveManager: ObservableObject {
     @Published private(set) var syncedFolders: [DriveSyncedFolder]
     @Published private(set) var syncOnLaunch: Bool
     @Published private(set) var storageBytes: Int64 = 0
+    /// Whether "Delete Song" may move songs to the Bin in Google Drive.
+    /// Off unless the user switched it on and gave Google's permission.
+    @Published private(set) var canDeleteFromDrive: Bool
+    /// True while Google's sheet for the delete permission is on screen.
+    @Published private(set) var isChangingPermission = false
 
     @Published private(set) var activity: Activity = .idle
     /// Songs found so far while looking through folders.
@@ -80,6 +85,8 @@ final class GoogleDriveManager: ObservableObject {
 
     private let auth: GoogleDriveAuth
     private var listingCache: [String: [DriveItem]] = [:]
+    /// Songs deleted from the iPhone but left in Drive; sync skips them.
+    private var ignoredIDs: Set<String>
 
     private var queue: [DriveJob] = []
     private var activeJobs: [String: DriveJob] = [:]
@@ -130,6 +137,8 @@ final class GoogleDriveManager: ObservableObject {
         downloaded = snapshot.files
         syncedFolders = snapshot.syncedFolders
         syncOnLaunch = defaults.bool(forKey: GoogleDriveConfig.Keys.syncOnLaunch)
+        canDeleteFromDrive = defaults.bool(forKey: GoogleDriveConfig.Keys.deleteAllowed)
+        ignoredIDs = Set(snapshot.ignored ?? [])
 
         clientPrefix = prefix
         accountEmail = defaults.string(forKey: GoogleDriveConfig.Keys.accountEmail)
@@ -160,7 +169,8 @@ final class GoogleDriveManager: ObservableObject {
         authState = .connecting
 
         do {
-            try await auth.signIn(clientPrefix: prefix)
+            // Asks for the delete permission again only if it was switched on.
+            try await auth.signIn(clientPrefix: prefix, fullAccess: canDeleteFromDrive)
             UserDefaults.standard.set(false, forKey: GoogleDriveConfig.Keys.needsReconnect)
             listingCache.removeAll()
             authState = .connected
@@ -172,6 +182,76 @@ final class GoogleDriveManager: ObservableObject {
                 authMessage = DriveError.message(for: error)
             }
         }
+    }
+
+    /// Switches "Allow deleting from Drive" on or off.
+    ///
+    /// On: shows Google's sheet again, this time asking for permission to
+    /// change files, and only switches on if Google grants it. Off: Sonora
+    /// stops deleting from Drive at once; the read-only sign-in is asked for
+    /// the next time the user connects.
+    func setDeleteAllowed(_ on: Bool) async {
+        guard on != canDeleteFromDrive, !isChangingPermission else { return }
+        let defaults = UserDefaults.standard
+        if !on {
+            canDeleteFromDrive = false
+            defaults.set(false, forKey: GoogleDriveConfig.Keys.deleteAllowed)
+            return
+        }
+        guard let prefix = clientPrefix, authState == .connected else {
+            authMessage = DriveError.notConnected.errorDescription
+            return
+        }
+        authMessage = nil
+        isChangingPermission = true
+        defer { isChangingPermission = false }
+        do {
+            try await auth.signIn(clientPrefix: prefix, fullAccess: true)
+            canDeleteFromDrive = true
+            defaults.set(true, forKey: GoogleDriveConfig.Keys.deleteAllowed)
+            defaults.set(false, forKey: GoogleDriveConfig.Keys.needsReconnect)
+            Haptics.success()
+        } catch {
+            // The earlier, read-only sign-in is still saved and still works.
+            if !DriveError.isCancellation(error) {
+                authMessage = DriveError.message(for: error)
+            }
+        }
+    }
+
+    // MARK: - Deleting
+
+    /// The Drive files a downloaded song came from. Usually one; more when
+    /// the same song was in Drive twice and one download served for both.
+    func driveFileIDs(forLocalPath relativePath: String) -> [String] {
+        downloaded.filter { $0.value.relativePath == relativePath }.map(\.key).sorted()
+    }
+
+    /// Moves the Drive file(s) behind a downloaded song to the Bin in Drive.
+    func moveToBin(localPath relativePath: String) async throws {
+        guard canDeleteFromDrive else {
+            throw DriveError.api("Deleting from Google Drive is switched off. Switch on “Allow deleting from Drive” on the Google Drive screen.")
+        }
+        for fileID in driveFileIDs(forLocalPath: relativePath) {
+            try await withToken { token in
+                try await DriveAPI.moveToBin(fileID: fileID, token: token)
+            }
+        }
+        // The folder listings still show the song.
+        listingCache.removeAll()
+    }
+
+    /// Call after a downloaded song's file was deleted from the iPhone.
+    /// With `keepOffThisPhone` the song is still in Drive, and sync is told
+    /// to leave it there instead of downloading it again.
+    func forgetDownload(localPath relativePath: String, keepOffThisPhone: Bool) {
+        let ids = driveFileIDs(forLocalPath: relativePath)
+        guard !ids.isEmpty else { return }
+        for id in ids {
+            downloaded[id] = nil
+            if keepOffThisPhone { ignoredIDs.insert(id) }
+        }
+        saveIndex()
     }
 
     /// Signs out. Downloaded music stays on the iPhone.
@@ -289,7 +369,7 @@ final class GoogleDriveManager: ObservableObject {
         lookTasks[taskID] = Task { [weak self] in
             guard let self else { return }
             await self.enqueue([DriveCandidate(item: item, folders: folder.pathComponents)],
-                               wifiOnly: false)
+                               wifiOnly: false, fromSync: false)
             self.lookTasks[taskID] = nil
             self.settleIfDone()
         }
@@ -344,7 +424,7 @@ final class GoogleDriveManager: ObservableObject {
                 do {
                     let candidates = try await self.collect(folder)
                     if Task.isCancelled { break }
-                    await self.enqueue(candidates, wifiOnly: wifiOnly)
+                    await self.enqueue(candidates, wifiOnly: wifiOnly, fromSync: markSynced)
                     if markSynced { self.noteSynced(folder.id) }
                 } catch {
                     if DriveError.isCancellation(error) { break }
@@ -398,7 +478,21 @@ final class GoogleDriveManager: ObservableObject {
     }
 
     /// Works out what really needs downloading and puts it in the queue.
-    private func enqueue(_ candidates: [DriveCandidate], wifiOnly: Bool) async {
+    ///
+    /// `fromSync`: an automatic or "Sync Now" pass leaves out songs the user
+    /// deleted from the iPhone. Asking for a song or a folder by hand
+    /// downloads them again and takes them off that list.
+    private func enqueue(_ all: [DriveCandidate], wifiOnly: Bool, fromSync: Bool) async {
+        var candidates = all
+        if !ignoredIDs.isEmpty {
+            if fromSync {
+                candidates = all.filter { !ignoredIDs.contains($0.item.id) }
+            } else {
+                let before = ignoredIDs.count
+                for candidate in all { ignoredIDs.remove(candidate.item.id) }
+                if ignoredIDs.count != before { saveIndex() }
+            }
+        }
         guard !candidates.isEmpty else { return }
         let busy = queuedIDs.union(activeJobs.keys)
         let plan = await DrivePlanner.plan(candidates: candidates,
@@ -816,6 +910,7 @@ final class GoogleDriveManager: ObservableObject {
 
         downloaded = [:]
         pendingPaths = []
+        ignoredIDs = []
         setSyncOnLaunch(false)
         for i in syncedFolders.indices { syncedFolders[i].lastSynced = nil }
         saveIndex()
@@ -844,7 +939,9 @@ final class GoogleDriveManager: ObservableObject {
 
     private func saveIndex() {
         unsavedChanges = 0
-        DriveIndexStore.save(DriveIndexSnapshot(files: downloaded, syncedFolders: syncedFolders))
+        DriveIndexStore.save(DriveIndexSnapshot(files: downloaded,
+                                                syncedFolders: syncedFolders,
+                                                ignored: ignoredIDs.isEmpty ? nil : ignoredIDs.sorted()))
     }
 
     // MARK: - Background grace time
