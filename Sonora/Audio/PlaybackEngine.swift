@@ -30,9 +30,13 @@ struct PlayableItem: Equatable {
 }
 
 private struct Segment {
+    /// Matches the schedule id, so a completion callback can find its segment.
+    let id: Int
     let trackID: UUID
-    let startFrame: AVAudioFramePosition   // in the player node's timeline
-    let frameCount: AVAudioFramePosition
+    // Both are corrected after the fact when a file turns out to hold fewer
+    // frames than it claimed (see `segmentPlayedOut`).
+    var startFrame: AVAudioFramePosition   // in the player node's timeline
+    var frameCount: AVAudioFramePosition
     let fileStartFrame: AVAudioFramePosition
     let sampleRate: Double
     var endFrame: AVAudioFramePosition { startFrame + frameCount }
@@ -573,7 +577,9 @@ final class PlaybackEngine {
         let frames = min(endFrame - startFrame, AVAudioFramePosition(AVAudioFrameCount.max))
         guard startFrame < file.length, frames > 0 else { return false }
 
-        let segment = Segment(trackID: item.trackID,
+        let scheduleID = newScheduleID()
+        let segment = Segment(id: scheduleID,
+                              trackID: item.trackID,
                               startFrame: nextScheduleFrame,
                               frameCount: frames,
                               fileStartFrame: startFrame,
@@ -582,7 +588,6 @@ final class PlaybackEngine {
         nextScheduleFrame += frames
 
         let node = player
-        let scheduleID = newScheduleID()
         node.scheduleSegment(file,
                              startingFrame: startFrame,
                              frameCount: AVAudioFrameCount(frames),
@@ -590,18 +595,73 @@ final class PlaybackEngine {
                              completionCallbackType: .dataPlayedBack) { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self, self.liveScheduleIDs.remove(scheduleID) != nil else { return }
-                self.segmentFinished(trackID: segment.trackID)
+                self.segmentPlayedOut(id: scheduleID)
             }
         }
         return true
     }
 
-    private func segmentFinished(trackID: UUID) {
-        // If nothing else is queued behind this segment we are done.
-        guard let last = segments.last else { return }
-        if last.trackID == trackID && pendingCrossfadeItem == nil {
-            onFinished?()
+    /// The player has finished one scheduled segment.
+    ///
+    /// Which song is on screen used to be worked out purely by arithmetic:
+    /// "segment 1 is N frames long, so segment 2 begins at frame N". That
+    /// holds only if the file really delivers N frames. A damaged or cut-off
+    /// MP3 claims a length in its header and then runs out early - sometimes
+    /// straight away. The player moved on to the next song while the
+    /// arithmetic still said the broken one was playing, so the screen showed
+    /// the wrong title, artwork and time until the phantom length had elapsed.
+    ///
+    /// This callback is the truth: the segment has ended, whatever its header
+    /// said. So everything behind it is re-anchored to where the player
+    /// actually is.
+    private func segmentPlayedOut(id: Int) {
+        guard let index = segments.firstIndex(where: { $0.id == id }) else { return }
+        let segment = segments[index]
+        // A segment completing proves the node is rendering this schedule.
+        awaitingFirstRender = false
+
+        let now = nodeSampleTime()
+        var playedSeconds: Double?
+        var expectedSeconds: Double = 0
+        if segment.sampleRate > 0 {
+            expectedSeconds = Double(segment.frameCount) / segment.sampleRate
+            if let now {
+                playedSeconds = max(0, Double(now - segment.startFrame)) / segment.sampleRate
+            }
         }
+        // A song of real length that produced under a second of sound.
+        let playedNothing = expectedSeconds > 3 && (playedSeconds ?? expectedSeconds) < 1
+        let name = currentItem?.trackID == segment.trackID ? currentItem?.url.lastPathComponent : nil
+        let damagedMessage = "“\(name ?? "A song")” has no sound that can be played, so Sonora skipped it. The file is probably damaged or incomplete."
+
+        // Nothing queued behind it.
+        if index == segments.count - 1 {
+            guard pendingCrossfadeItem == nil else { return }
+            if playedNothing, let item = currentItem, item.trackID == segment.trackID {
+                // Treat it like a file that would not open, so the controller
+                // moves on and a queue of broken files cannot loop forever.
+                lastOpenFailure = AudioFileDoctor.Failure(problem: .unreadable, message: damagedMessage)
+                reportUnplayable(item, wantedToPlay: true)
+            } else {
+                onFinished?()
+            }
+            return
+        }
+
+        // The next song is already playing. Re-anchor it to the real position.
+        if let now {
+            let drift = now - segment.endFrame
+            if abs(Double(drift)) > 0.25 * segment.sampleRate {
+                segments[index].frameCount = max(0, segment.frameCount + drift)
+                for later in (index + 1)..<segments.count {
+                    segments[later].startFrame += drift
+                }
+                nextScheduleFrame += drift
+            }
+        }
+        if playedNothing { onError?(damagedMessage) }
+        // Switch title, artwork and clock now rather than at the next tick.
+        tick()
     }
 
     // MARK: - Gapless chaining
