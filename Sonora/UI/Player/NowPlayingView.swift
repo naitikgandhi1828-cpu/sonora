@@ -24,6 +24,7 @@ struct NowPlayingView: View {
     @State private var showLyrics = false
     @State private var showErrorAlert = false
     @State private var editTarget: TagEditTarget?
+    @State private var deleteRequest: SongDeleteRequest?
 
     private var track: Track? { player.currentTrack }
 
@@ -58,6 +59,7 @@ struct NowPlayingView: View {
         .sheet(isPresented: $showLyrics) {
             LyricsView().presentationDetents([.medium, .large]).themedSheet(themes)
         }
+        .deleteSongDialog($deleteRequest)
         // The album tint itself is kept current by RootView, which is alive
         // for the whole session (it used to be worked out only here).
         .onChange(of: player.errorMessage) { _, message in
@@ -204,6 +206,12 @@ struct NowPlayingView: View {
                                       systemImage: track.rating == r ? "checkmark" : "")
                             }
                         }
+                    }
+                    Divider()
+                    Button(role: .destructive) {
+                        deleteRequest = SongDeleteRequest(trackID: track.id)
+                    } label: {
+                        Label("Delete Song…", systemImage: "trash")
                     }
                 }
             } label: {
