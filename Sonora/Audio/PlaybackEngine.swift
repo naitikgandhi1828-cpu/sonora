@@ -896,7 +896,8 @@ final class PlaybackEngine {
             // from tags and may be 0 or garbage.
             let incomingRate = currentFormat?.sampleRate ?? 0
             let rate = incomingRate > 0 ? incomingRate : 48_000
-            let incomingSegment = Segment(trackID: incoming.trackID,
+            let incomingSegment = Segment(id: liveScheduleIDs.first ?? 0,
+                                          trackID: incoming.trackID,
                                           startFrame: 0,
                                           frameCount: sonoraFramePosition(seconds: incoming.duration, sampleRate: rate),
                                           fileStartFrame: sonoraFramePosition(seconds: incoming.startTime, sampleRate: rate),
