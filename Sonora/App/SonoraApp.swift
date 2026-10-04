@@ -61,6 +61,9 @@ struct SonoraApp: App {
                 .task {
                     // Pick up anything the user dropped in through the Files app.
                     await library.importDocumentsFolder()
+                    // Off unless switched on in Settings › Google Drive, and
+                    // then only on Wi-Fi.
+                    await GoogleDriveManager.launchSyncIfEnabled()
                 }
                 .onOpenURL { url in
                     Task { await library.importFiles(urls: [url]) }
