@@ -165,7 +165,7 @@ struct GoogleDriveView: View {
         } header: {
             Text("Client ID")
         } footer: {
-            Text("It looks like 1234567890-abc123.apps.googleusercontent.com. Sonora only asks to read your Drive; it can never change or delete anything there.")
+            Text("It looks like 1234567890-abc123.apps.googleusercontent.com. Sonora only asks to read your Drive. It can delete a song there only if you later switch on “Allow deleting from Drive”.")
         }
         .themedRow(themes.theme)
     }
@@ -173,7 +173,7 @@ struct GoogleDriveView: View {
     // MARK: Connected
 
     private var accountSection: some View {
-        Section("Account") {
+        Section {
             HStack(spacing: 12) {
                 Image(systemName: "person.crop.circle.fill")
                     .font(.system(size: 30))
@@ -192,6 +192,28 @@ struct GoogleDriveView: View {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
             }
+
+            Toggle(isOn: Binding(get: { drive.canDeleteFromDrive },
+                                 set: { on in Task { await drive.setDeleteAllowed(on) } })) {
+                HStack(spacing: 8) {
+                    Text("Allow deleting from Drive")
+                        .foregroundStyle(themes.theme.textPrimary)
+                    if drive.isChangingPermission { ProgressView().controlSize(.small) }
+                }
+            }
+            .disabled(drive.isChangingPermission)
+
+            if let message = drive.authMessage {
+                Text(message)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.red)
+            }
+        } header: {
+            Text("Account")
+        } footer: {
+            Text(drive.canDeleteFromDrive
+                 ? "“Delete Song” can now move a song to the Bin in Google Drive, where Google keeps it for 30 days. Sonora never deletes anything in Drive by itself."
+                 : "Off: Sonora can only read your Drive. Switch this on if you want “Delete Song” to remove a song from Google Drive too. Google will ask you to sign in again and allow it.")
         }
         .themedRow(themes.theme)
     }
