@@ -17,6 +17,10 @@ struct RootView: View {
     @State private var selectedTab = 0
     @State private var showFullPlayer = false
     @State private var showErrorAlert = false
+    @State private var showDuplicateReview = false
+    /// Sonora brings the question up by itself once per launch; after that
+    /// the card on the Library screen is the way in.
+    @State private var askedAboutDuplicates = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -78,6 +82,23 @@ struct RootView: View {
         } message: {
             Text(player.errorMessage ?? "")
         }
+        .sheet(isPresented: $showDuplicateReview) {
+            DuplicateReviewView().themedSheet(themes)
+        }
+        .onChange(of: library.duplicateQuestions.isEmpty) { _, _ in askAboutDuplicates() }
+        .onChange(of: library.isScanning) { _, _ in askAboutDuplicates() }
+        .onChange(of: showFullPlayer) { _, _ in askAboutDuplicates() }
+    }
+
+    /// Opens the "are these the same song?" sheet when Sonora has found
+    /// pairs it is not sure about — but not over the full player or in the
+    /// middle of a scan, where more pairs may still turn up.
+    private func askAboutDuplicates() {
+        guard !askedAboutDuplicates, !showDuplicateReview,
+              !library.duplicateQuestions.isEmpty,
+              !showFullPlayer, !library.isScanning else { return }
+        askedAboutDuplicates = true
+        showDuplicateReview = true
     }
 }
 

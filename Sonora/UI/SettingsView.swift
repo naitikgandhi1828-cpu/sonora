@@ -25,6 +25,7 @@ struct SettingsView: View {
             List {
                 foldersSection
                 driveSection
+                duplicatesSection
                 batterySection
                 playbackSection
                 appearanceSection
@@ -138,6 +139,32 @@ struct SettingsView: View {
             Text("Cloud Music")
         } footer: {
             Text("Connect Google Drive to download songs from it. They are saved on your iPhone, show up in your library and play without internet.")
+        }
+        .tint(themes.accent)
+        .themedRow(themes.theme)
+    }
+
+    private var duplicatesSection: some View {
+        Section {
+            NavigationLink {
+                DuplicateSettingsView()
+            } label: {
+                HStack {
+                    Label("Duplicate Songs", systemImage: "square.on.square")
+                    Spacer()
+                    if !library.duplicateQuestions.isEmpty {
+                        Text("\(library.duplicateQuestions.count) to review")
+                            .font(.system(size: 13))
+                            .foregroundStyle(themes.accent)
+                    } else if !library.mergedGroups.isEmpty {
+                        Text("\(library.mergedGroups.count) merged")
+                            .font(.system(size: 13))
+                            .foregroundStyle(themes.theme.textSecondary)
+                    }
+                }
+            }
+        } footer: {
+            Text("The same song stored twice is shown once. Sonora asks when it is not sure, and remembers your answer.")
         }
         .tint(themes.accent)
         .themedRow(themes.theme)
