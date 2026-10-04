@@ -57,6 +57,9 @@ final class PlaybackController: ObservableObject {
     private var unplayableStreak = 0
     /// The song we are waiting on iCloud for, if any.
     private var awaitingDownload: UUID?
+    /// Where the current song was started from, to tell real progress apart
+    /// from a file that "plays" without producing any sound.
+    private var positionAtLoad: TimeInterval = 0
 
     let sleepTimer = SleepTimer()
 
@@ -106,6 +109,10 @@ final class PlaybackController: ObservableObject {
             // background, and `position` only reaches views through `clock`,
             // so no throttle is needed here.
             self.position = pos
+            // A song that has really moved forward ends any run of failures.
+            if self.unplayableStreak > 0, pos > self.positionAtLoad + 1 {
+                self.unplayableStreak = 0
+            }
             let newDuration = dur > 0 ? dur : (self.currentTrack?.duration ?? 0)
             if abs(newDuration - self.duration) > 0.001 {
                 self.duration = newDuration
@@ -645,9 +652,9 @@ final class PlaybackController: ObservableObject {
         setCurrent(trackID: queue[currentIndex])
         position = item.startTime
         awaitingDownload = nil
+        positionAtLoad = item.startTime
         engine.load(item: item, autoplay: autoplay)
         isPlaying = autoplay && engine.isPlaying
-        if engine.isPlaying { unplayableStreak = 0 }
         library.markPlayed(queue[currentIndex])
         if settings.shuffleMode != .off {
             shuffleHistory.append(queue[currentIndex])
