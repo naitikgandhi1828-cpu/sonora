@@ -24,6 +24,7 @@ struct SettingsView: View {
         NavigationStack {
             List {
                 foldersSection
+                driveSection
                 batterySection
                 playbackSection
                 appearanceSection
@@ -123,6 +124,22 @@ struct SettingsView: View {
         } message: { root in
             Text("Its \(root.trackCount) tracks leave your library and playlists. The files themselves stay where they are, and you can add the folder again any time.")
         }
+        .themedRow(themes.theme)
+    }
+
+    private var driveSection: some View {
+        Section {
+            NavigationLink {
+                GoogleDriveView()
+            } label: {
+                Label("Google Drive", systemImage: "icloud.and.arrow.down")
+            }
+        } header: {
+            Text("Cloud Music")
+        } footer: {
+            Text("Connect Google Drive to download songs from it. They are saved on your iPhone, show up in your library and play without internet.")
+        }
+        .tint(themes.accent)
         .themedRow(themes.theme)
     }
 
