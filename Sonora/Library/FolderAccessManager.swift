@@ -45,6 +45,20 @@ final class FolderAccessManager {
         }
         lock.unlock()
 
+        // A folder inside Sonora's own Documents folder needs no bookmark and
+        // no security scope. It is rebuilt from the current Documents path on
+        // every launch, so it keeps working when iOS moves the app container
+        // (which it may do on an update, leaving the bookmark stale).
+        if let relative = root.appRelativePath {
+            let url = relative.isEmpty
+                ? Self.documentsFolder
+                : Self.documentsFolder.appendingPathComponent(relative, isDirectory: true)
+            lock.lock()
+            resolvedRoots[root.id] = url
+            lock.unlock()
+            return url
+        }
+
         var stale = false
         do {
             let url = try URL(resolvingBookmarkData: root.bookmark,

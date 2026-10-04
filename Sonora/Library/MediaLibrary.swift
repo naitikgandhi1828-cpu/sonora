@@ -99,6 +99,41 @@ final class MediaLibrary: ObservableObject {
         save()
     }
 
+    /// Makes sure a folder inside Sonora's own Documents folder (the Google
+    /// Drive downloads) is one of the library's roots, and returns its id.
+    /// Unlike `addRoot` it does not scan; call `rescan(rootID:)` afterwards.
+    @discardableResult
+    func ensureAppFolderRoot(relativePath: String, displayName: String) -> UUID {
+        if let existing = roots.first(where: { $0.appRelativePath == relativePath }) {
+            return existing.id
+        }
+        let url = FolderAccessManager.documentsFolder
+            .appendingPathComponent(relativePath, isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        // The same folder added earlier by hand through the Files picker:
+        // adopt it rather than listing the music twice.
+        if let idx = roots.firstIndex(where: { $0.lastKnownPath == url.path }) {
+            roots[idx].appRelativePath = relativePath
+            FolderAccessManager.shared.release(roots[idx].id)
+            save()
+            return roots[idx].id
+        }
+        // The bookmark is never used for this root (see FolderAccessManager),
+        // so an empty one is fine if iOS refuses to make it.
+        var root = FolderRoot(displayName: displayName,
+                              bookmark: FolderAccessManager.shared.makeBookmark(for: url) ?? Data(),
+                              lastKnownPath: url.path)
+        root.appRelativePath = relativePath
+        roots.append(root)
+        save()
+        return root.id
+    }
+
+    /// The root registered with `ensureAppFolderRoot`, if it is still there.
+    func appFolderRoot(relativePath: String) -> FolderRoot? {
+        roots.first { $0.appRelativePath == relativePath }
+    }
+
     func removeRoot(_ root: FolderRoot) {
         FolderAccessManager.shared.release(root.id)
         let removedIDs = Set(tracks.filter { $0.rootID == root.id }.map(\.id))
@@ -184,6 +219,78 @@ final class MediaLibrary: ObservableObject {
             rebuildIndex()
             save()
         }
+    }
+
+    /// Adds specific files under a root to the library without rescanning
+    /// the whole folder. Used after Google Drive downloads: reading tags for
+    /// a few new songs is far cheaper than re-reading thousands, and unlike
+    /// a rescan it leaves every existing track (and so the play queue and
+    /// playlists) exactly as it was.
+    ///
+    /// A path that is already in the library is refreshed in place, keeping
+    /// its identity, play count and rating. Returns how many tracks are new.
+    @discardableResult
+    func indexFiles(rootID: UUID, relativePaths: [String]) async -> Int {
+        guard let root = roots.first(where: { $0.id == rootID }),
+              let base = FolderAccessManager.shared.resolve(root) else { return 0 }
+
+        var fresh: [Track] = []
+        var seen = Set<String>()
+        var albumArtwork: [String: String] = [:]
+
+        for relative in relativePaths where seen.insert(relative).inserted {
+            let url = base.appendingPathComponent(relative)
+            guard AudioFormats.isPlayable(url.pathExtension),
+                  FileManager.default.fileExists(atPath: url.path) else { continue }
+            guard var info = await MetadataReader.read(url: url, rootID: rootID,
+                                                       relativePath: relative) else { continue }
+            if info.track.duration < settings.minimumTrackSeconds { continue }
+
+            let albumKey = info.track.albumKey
+            if let known = albumArtwork[albumKey] {
+                info.track.artworkKey = known
+            } else if let data = info.artwork,
+                      let key = ArtworkStore.shared.store(data, forAlbumKey: albumKey) {
+                albumArtwork[albumKey] = key
+                info.track.artworkKey = key
+            } else if let key = tracks.first(where: { $0.albumKey == albumKey && $0.artworkKey != nil })?.artworkKey {
+                // Another song of the same album already has a cover.
+                albumArtwork[albumKey] = key
+                info.track.artworkKey = key
+            }
+            applyOverrides(to: &info.track)
+            fresh.append(info.track)
+        }
+        // The folder may have been removed from the library while the tags
+        // were being read; its songs must not come back without it.
+        guard !fresh.isEmpty, roots.contains(where: { $0.id == rootID }) else { return 0 }
+
+        // One assignment to `tracks` so observers redraw once.
+        var updated = tracks
+        var added = 0
+        for var track in fresh {
+            if let idx = updated.firstIndex(where: { $0.rootID == rootID
+                                                     && $0.relativePath == track.relativePath
+                                                     && !$0.isCueTrack }) {
+                let old = updated[idx]
+                track.id = old.id
+                track.dateAdded = old.dateAdded
+                track.playCount = old.playCount
+                track.lastPlayed = old.lastPlayed
+                track.rating = old.rating
+                updated[idx] = track
+            } else {
+                updated.append(track)
+                added += 1
+            }
+        }
+        tracks = updated
+        if let idx = roots.firstIndex(where: { $0.id == rootID }) {
+            roots[idx].trackCount = tracks.reduce(0) { $0 + ($1.rootID == rootID ? 1 : 0) }
+        }
+        rebuildIndex()
+        save()
+        return added
     }
 
     // MARK: - Scanning

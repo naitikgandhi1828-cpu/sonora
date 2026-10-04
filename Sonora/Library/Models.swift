@@ -19,6 +19,12 @@ struct FolderRoot: Identifiable, Codable, Hashable {
     var trackCount: Int = 0
     /// Last known absolute path, used only for display and diagnostics.
     var lastKnownPath: String = ""
+    /// Set only for folders that live inside Sonora's own Documents folder
+    /// (the Google Drive downloads): the path relative to Documents. Such a
+    /// root is resolved from this instead of the bookmark, because iOS can
+    /// move the app's container on an update and the bookmark then points at
+    /// a path that no longer exists. Optional so older libraries still decode.
+    var appRelativePath: String?
 }
 
 // MARK: - Track
