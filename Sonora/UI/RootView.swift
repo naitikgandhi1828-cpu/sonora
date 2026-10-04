@@ -69,10 +69,12 @@ struct RootView: View {
             themes.refreshArtworkTint()
         }
         .onChange(of: player.errorMessage) { _, message in
-            showErrorAlert = message != nil
+            // While the full player is up it shows the alert itself; an alert
+            // raised from behind a full-screen cover never appears.
+            showErrorAlert = message != nil && !showFullPlayer
         }
         .alert("Playback problem", isPresented: $showErrorAlert) {
-            Button("OK", role: .cancel) {}
+            Button("OK", role: .cancel) { player.dismissError() }
         } message: {
             Text(player.errorMessage ?? "")
         }
