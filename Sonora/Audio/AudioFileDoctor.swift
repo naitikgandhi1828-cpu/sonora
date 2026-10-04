@@ -430,11 +430,24 @@ enum AudioFileDoctor {
 
     // MARK: - Format check
 
-    /// A file the engine can actually connect and schedule.
+    /// A file the engine can actually connect, schedule and decode.
     private static func isUsable(_ file: AVAudioFile) -> Bool {
         let format = file.processingFormat
         guard format.sampleRate > 0, format.sampleRate.isFinite, format.channelCount > 0 else { return false }
         if format.channelCount > 2 && format.channelLayout == nil { return false }
-        return file.length > 0
+        guard file.length > 0 else { return false }
+
+        // Opening is not proof: iOS will open some files it then cannot
+        // decode a single sample of. Read a sliver to find out now, while the
+        // file can still be repaired or reported, instead of discovering it as
+        // silence.
+        guard let probe = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4096) else { return false }
+        do {
+            try file.read(into: probe, frameCount: 4096)
+        } catch {
+            return false
+        }
+        file.framePosition = 0
+        return probe.frameLength > 0
     }
 }
