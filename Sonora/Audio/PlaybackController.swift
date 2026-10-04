@@ -461,6 +461,42 @@ final class PlaybackController: ObservableObject {
         }
     }
 
+    /// Called just before music files are deleted. Takes the songs out of
+    /// the queue; if one of them is playing, moves on to the next song that
+    /// is staying (or stops when there is none) so the player never holds
+    /// on to a file that is about to disappear.
+    func tracksWillBeDeleted(_ ids: Set<UUID>) {
+        guard !ids.isEmpty, queue.contains(where: { ids.contains($0) }) else { return }
+        let wasPlaying = isPlaying
+        let currentID = currentTrack?.id
+        let currentGoes = currentID.map { ids.contains($0) } ?? false
+
+        // Where to carry on: the next survivor after the current song,
+        // else the nearest one before it.
+        var resumeID: UUID?
+        if currentGoes, queue.indices.contains(currentIndex) {
+            resumeID = queue[(currentIndex + 1)...].first { !ids.contains($0) }
+                ?? queue[..<currentIndex].last { !ids.contains($0) }
+        }
+
+        queue.removeAll { ids.contains($0) }
+        unshuffledQueue.removeAll { ids.contains($0) }
+        shuffleHistory.removeAll { ids.contains($0) }
+
+        if currentGoes {
+            if let resumeID, let idx = queue.firstIndex(of: resumeID) {
+                currentIndex = idx
+                startCurrent(autoplay: wasPlaying)
+            } else {
+                stop()
+                if queue.isEmpty { queueSourceName = "" }
+            }
+        } else if let currentID, let idx = queue.firstIndex(of: currentID) {
+            currentIndex = idx
+            engine.invalidateChain()
+        }
+    }
+
     func clearQueue() {
         stop()
         queue.removeAll()
