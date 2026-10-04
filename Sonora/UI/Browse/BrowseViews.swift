@@ -619,6 +619,7 @@ private struct TrackContextMenu: ViewModifier {
     @EnvironmentObject private var themes: ThemeManager
     @State private var showInfo = false
     @State private var editTarget: TagEditTarget?
+    @State private var deleteRequest: SongDeleteRequest?
 
     func body(content: Content) -> some View {
         content
@@ -647,7 +648,12 @@ private struct TrackContextMenu: ViewModifier {
                 Button {
                     editTarget = TagEditTarget(trackIDs: [track.id])
                 } label: { Label("Edit Tags…", systemImage: "tag") }
+                Divider()
+                Button(role: .destructive) {
+                    deleteRequest = SongDeleteRequest(trackID: track.id)
+                } label: { Label("Delete Song…", systemImage: "trash") }
             }
+            .deleteSongDialog($deleteRequest)
             .sheet(isPresented: $showInfo) {
                 TrackInfoView(track: track).presentationDetents([.medium, .large]).themedSheet(themes)
             }

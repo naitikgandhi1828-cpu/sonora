@@ -19,6 +19,7 @@ struct LibraryHomeView: View {
     @State private var showFolderPicker = false
     @State private var showFilePicker = false
     @State private var showGoogleDrive = false
+    @State private var showDuplicateReview = false
 
     var body: some View {
         NavigationStack {
@@ -70,6 +71,9 @@ struct LibraryHomeView: View {
             .navigationDestination(isPresented: $showGoogleDrive) {
                 GoogleDriveView()
             }
+            .sheet(isPresented: $showDuplicateReview) {
+                DuplicateReviewView().themedSheet(themes)
+            }
             .fileImporter(isPresented: $showFolderPicker,
                           allowedContentTypes: [.folder],
                           allowsMultipleSelection: false) { result in
@@ -91,6 +95,11 @@ struct LibraryHomeView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 if library.isScanning { scanBanner }
+                if !library.duplicateQuestions.isEmpty {
+                    DuplicateBanner(count: library.duplicateQuestions.count) {
+                        showDuplicateReview = true
+                    }
+                }
                 quickActions
                 if !library.recentlyPlayedIDs.isEmpty { recentSection }
                 browseGrid
