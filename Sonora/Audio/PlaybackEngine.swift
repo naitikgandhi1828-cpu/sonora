@@ -175,6 +175,11 @@ final class PlaybackEngine {
     var onTick: ((TimeInterval, TimeInterval) -> Void)?
     /// A hard failure that the UI should surface.
     var onError: ((String) -> Void)?
+    /// The file asked for could not be opened. The Bool says whether it was
+    /// meant to start playing, so the controller can move on to the next song.
+    var onUnplayable: ((AudioFileDoctor.Failure, Bool) -> Void)?
+    /// Why the most recent `openFile` call failed.
+    private var lastOpenFailure: AudioFileDoctor.Failure?
     /// Play state changed (including engine-initiated pauses and resumes).
     var onPlayStateChanged: ((Bool) -> Void)?
 
@@ -277,9 +282,10 @@ final class PlaybackEngine {
         return true
     }
 
+    @discardableResult
     private func connectPlayer(_ node: AVAudioPlayerNode,
                                to mixer: AVAudioMixerNode,
-                               format: AVAudioFormat) {
+                               format: AVAudioFormat) -> Bool {
         sonoraCatch("connect player") {
             engine.disconnectNodeOutput(node)
             engine.connect(node, to: mixer, format: format)
@@ -419,7 +425,7 @@ final class PlaybackEngine {
         if autoplay { session.activate() }
 
         guard let file = openFile(for: item) else {
-            onError?("Cannot open \(item.url.lastPathComponent)")
+            reportUnplayable(item, wantedToPlay: autoplay)
             return
         }
 
@@ -427,7 +433,12 @@ final class PlaybackEngine {
         // saver we cap at 48 kHz: hi-res rates double or quadruple the work
         // every effect in the chain does, for no audible gain on most outputs.
         let fileRate = file.processingFormat.sampleRate
-        let targetRate = settings.batterySaverActive ? min(fileRate, 48_000) : fileRate
+        // Never ask the hardware to run below 44.1 kHz. Low-rate files (many
+        // older or voice-quality MP3s are 22 or 32 kHz) are resampled up by
+        // the mixer instead; dragging the whole effect chain down to their
+        // rate puts the upper EQ bands above what that rate can carry.
+        let wantedRate = max(44_100, fileRate)
+        let targetRate = settings.batterySaverActive ? min(wantedRate, 48_000) : wantedRate
         let achieved = session.preferSampleRate(targetRate)
         // AVAudioSession.sampleRate reports 0 when the session has no active
         // route (during an interruption, or mid route change). Building an
@@ -458,8 +469,18 @@ final class PlaybackEngine {
         openFiles = [item.trackID: file]
 
         currentFormat = file.processingFormat
-        connectPlayer(playerA, to: gainA, format: file.processingFormat)
+        let connected = connectPlayer(playerA, to: gainA, format: file.processingFormat)
         connectPlayer(playerB, to: gainB, format: file.processingFormat)
+        guard connected else {
+            // Without this the player was left unplugged and the song simply
+            // sat there silent, with no message at all.
+            let format = file.processingFormat
+            lastOpenFailure = AudioFileDoctor.Failure(
+                problem: .unreadable,
+                message: "“\(item.url.lastPathComponent)” uses a sound format the player cannot handle (\(Int(format.sampleRate)) Hz, \(format.channelCount) channels).")
+            reportUnplayable(item, wantedToPlay: autoplay)
+            return
+        }
 
         currentItem = item
         applyGain(item.gainDB, to: gainA, ramp: false)
@@ -495,18 +516,46 @@ final class PlaybackEngine {
     private func openFile(for item: PlayableItem) -> AVAudioFile? {
         let scoped = item.url.startAccessingSecurityScopedResource()
         defer { if scoped { /* keep access for the life of the file object */ } }
-        do {
-            let file = try AVAudioFile(forReading: item.url)
-            // A file whose format cannot be connected would crash the engine
-            // in `connect`; treat it like any other unreadable file.
-            guard Self.isConnectable(file.processingFormat), file.length > 0 else {
-                print("[Engine] unsupported format: \(file.processingFormat)")
-                return nil
-            }
+        // The doctor opens the file normally when it can, and otherwise works
+        // out what is wrong with it (wrong extension, junk before the audio,
+        // still in iCloud...) and repairs what is repairable.
+        switch AudioFileDoctor.open(item.url) {
+        case .success(let file):
+            lastOpenFailure = nil
             return file
-        } catch {
-            print("[Engine] open failed: \(error)")
+        case .failure(let failure):
+            lastOpenFailure = failure
+            print("[Engine] open failed: \(failure.message)")
             return nil
+        }
+    }
+
+    /// Stops whatever was playing and tells the controller why the new item
+    /// could not start.
+    private func reportUnplayable(_ item: PlayableItem, wantedToPlay: Bool) {
+        let failure = lastOpenFailure ?? AudioFileDoctor.Failure(
+            problem: .unreadable,
+            message: "“\(item.url.lastPathComponent)” could not be opened.")
+        // The screen now shows the new song; the old one must not keep playing.
+        playerA.stop()
+        playerB.stop()
+        segments.removeAll()
+        liveScheduleIDs.removeAll()
+        crossfadeScheduleID = nil
+        chainedItem = nil
+        pendingCrossfadeItem = nil
+        crossfadeRamp = nil
+        currentItem = nil
+        let wasPlaying = isPlaying
+        isPlaying = false
+        scheduleEngineIdle()
+        updateTicker()
+        if wasPlaying { onPlayStateChanged?(false) }
+
+        if let onUnplayable {
+            onUnplayable(failure, wantedToPlay)
+        } else {
+            onError?(failure.message)
         }
     }
 

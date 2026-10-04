@@ -52,6 +52,11 @@ final class PlaybackController: ObservableObject {
     /// The order the queue was built in, before shuffling.
     private var unshuffledQueue: [UUID] = []
     private var shuffleHistory: [UUID] = []
+    /// Songs in a row that would not open. Stops a queue full of unreadable
+    /// files from being skipped through endlessly.
+    private var unplayableStreak = 0
+    /// The song we are waiting on iCloud for, if any.
+    private var awaitingDownload: UUID?
 
     let sleepTimer = SleepTimer()
 
@@ -129,6 +134,9 @@ final class PlaybackController: ObservableObject {
         }
         engine.onError = { [weak self] message in
             self?.errorMessage = message
+        }
+        engine.onUnplayable = { [weak self] failure, wantedToPlay in
+            self?.handleUnplayable(failure, wantedToPlay: wantedToPlay)
         }
         // Interruptions and headphone unplug/plug pause or resume inside the
         // engine; mirror that here so the UI and lock screen stay truthful.
@@ -636,8 +644,10 @@ final class PlaybackController: ObservableObject {
         }
         setCurrent(trackID: queue[currentIndex])
         position = item.startTime
+        awaitingDownload = nil
         engine.load(item: item, autoplay: autoplay)
         isPlaying = autoplay && engine.isPlaying
+        if engine.isPlaying { unplayableStreak = 0 }
         library.markPlayed(queue[currentIndex])
         if settings.shuffleMode != .off {
             shuffleHistory.append(queue[currentIndex])
@@ -645,6 +655,62 @@ final class PlaybackController: ObservableObject {
         }
         refreshNowPlaying()
         analyzeGainIfNeeded(for: queue[currentIndex])
+    }
+
+    // MARK: - Files that will not open
+
+    /// Called when the listener dismisses the alert, so the same message can
+    /// be shown again if the same song fails a second time.
+    func dismissError() { errorMessage = nil }
+
+    /// One song failing must not stop the music: say why once, then carry on
+    /// with the next song. A song still coming down from iCloud is waited for
+    /// instead of skipped.
+    private func handleUnplayable(_ failure: AudioFileDoctor.Failure, wantedToPlay: Bool) {
+        isPlaying = false
+        refreshNowPlaying()
+
+        if failure.problem == .downloading, let trackID = currentTrack?.id {
+            errorMessage = failure.message
+            if wantedToPlay { waitForDownload(of: trackID) }
+            return
+        }
+
+        unplayableStreak += 1
+        // Only the first failure in a run gets an alert; a folder of bad files
+        // would otherwise bury the screen in pop-ups.
+        if unplayableStreak == 1 { errorMessage = failure.message }
+
+        guard wantedToPlay, unplayableStreak <= 5, queue.count > 1,
+              let target = indexAfter(currentIndex, userInitiated: true),
+              target != currentIndex else { return }
+        // Not from inside the engine's own load call: let that finish first.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.queue.indices.contains(target) else { return }
+            self.currentIndex = target
+            self.startCurrent(autoplay: true)
+        }
+    }
+
+    /// Checks every two seconds, for up to two minutes, whether iCloud has
+    /// delivered the song, and starts it if the listener is still waiting on it.
+    private func waitForDownload(of trackID: UUID) {
+        awaitingDownload = trackID
+        Task { @MainActor [weak self] in
+            for _ in 0..<60 {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard let self, self.awaitingDownload == trackID,
+                      self.currentTrack?.id == trackID, !self.isPlaying else { return }
+                guard let track = self.library.track(id: trackID),
+                      let url = self.library.url(for: track) else { return }
+                if AudioFileDoctor.isOnDevice(url) {
+                    self.awaitingDownload = nil
+                    self.errorMessage = nil
+                    self.startCurrent(autoplay: true)
+                    return
+                }
+            }
+        }
     }
 
     private func setCurrent(trackID: UUID) {
