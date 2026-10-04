@@ -18,6 +18,7 @@ struct LibraryHomeView: View {
 
     @State private var showFolderPicker = false
     @State private var showFilePicker = false
+    @State private var showGoogleDrive = false
 
     var body: some View {
         NavigationStack {
@@ -45,6 +46,9 @@ struct LibraryHomeView: View {
                         Button { showFilePicker = true } label: {
                             Label("Add Files…", systemImage: "doc.badge.plus")
                         }
+                        Button { showGoogleDrive = true } label: {
+                            Label("Add from Google Drive", systemImage: "icloud.and.arrow.down")
+                        }
                         Divider()
                         Button {
                             Task { await library.rescanAll() }
@@ -62,6 +66,9 @@ struct LibraryHomeView: View {
                     }
                     .tint(themes.accent)
                 }
+            }
+            .navigationDestination(isPresented: $showGoogleDrive) {
+                GoogleDriveView()
             }
             .fileImporter(isPresented: $showFolderPicker,
                           allowedContentTypes: [.folder],
