@@ -26,6 +26,21 @@ final class MediaLibrary: ObservableObject {
 
     @Published var recentlyPlayedIDs: [UUID] = []
 
+    // Duplicates. `tracks` holds only what the library shows; copies merged
+    // into another song live in `hiddenTracks` and can still be looked up
+    // (and played) by id, so nothing that points at them breaks.
+    /// Pairs Sonora is not sure about and wants the user to decide.
+    @Published private(set) var duplicateQuestions: [DuplicateQuestion] = []
+    /// Songs that have other copies hidden behind them.
+    @Published private(set) var mergedGroups: [MergedSongGroup] = []
+    /// The user's answers and "always do this" rules.
+    @Published private(set) var duplicateMemory = DuplicateMemory()
+    private var hiddenTracks: [Track] = []
+    private var hiddenIndex: [UUID: Int] = [:]
+    /// Hidden copy → the song it is merged into.
+    private var keeperOfHidden: [UUID: UUID] = [:]
+    private var songKeyCache: [DuplicateFinder.RawTags: SongKey] = [:]
+
     private let indexer = LibraryIndexer()
     private let settings: AppSettings
     private var trackIndex: [UUID: Int] = [:]
@@ -46,13 +61,29 @@ final class MediaLibrary: ObservableObject {
         self.settings = settings
         load()
         loadOverrides()
+        loadDuplicates()
+        // Shortly after launch rather than during it: this is where a library
+        // from an older version gets its duplicates merged for the first time.
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard let self else { return }
+            await self.warmSongKeys(for: self.tracks + self.hiddenTracks)
+            guard !self.isScanning else { return }
+            self.reconcileDuplicates()
+            self.save()
+        }
     }
 
     // MARK: - Lookup
 
     func track(id: UUID) -> Track? {
-        guard let idx = liveIndex(of: id) else { return nil }
-        return tracks[idx]
+        if let idx = liveIndex(of: id) { return tracks[idx] }
+        // A copy that was merged into another song: still a real file.
+        if let idx = hiddenIndex[id], hiddenTracks.indices.contains(idx),
+           hiddenTracks[idx].id == id {
+            return hiddenTracks[idx]
+        }
+        return nil
     }
 
     func tracks(ids: [UUID]) -> [Track] {
@@ -138,6 +169,7 @@ final class MediaLibrary: ObservableObject {
         FolderAccessManager.shared.release(root.id)
         let removedIDs = Set(tracks.filter { $0.rootID == root.id }.map(\.id))
         tracks.removeAll { $0.rootID == root.id }
+        hiddenTracks.removeAll { $0.rootID == root.id }
         roots.removeAll { $0.id == root.id }
         for i in playlists.indices {
             playlists[i].trackIDs.removeAll { removedIDs.contains($0) }
@@ -153,6 +185,8 @@ final class MediaLibrary: ObservableObject {
             saveOverrides()
         }
         rebuildIndex()
+        // A copy that was hidden behind a song in this folder comes back.
+        reconcileDuplicates()
         save()
     }
 
@@ -187,6 +221,7 @@ final class MediaLibrary: ObservableObject {
             added += 1
         }
         rebuildIndex()
+        if added > 0 { reconcileDuplicates() }
         save()
         scanStatus = added > 0 ? "Added \(added) file\(added == 1 ? "" : "s")" : "Nothing new to add"
     }
@@ -217,6 +252,7 @@ final class MediaLibrary: ObservableObject {
         }
         if added > 0 {
             rebuildIndex()
+            reconcileDuplicates()
             save()
         }
     }
@@ -286,9 +322,10 @@ final class MediaLibrary: ObservableObject {
         }
         tracks = updated
         if let idx = roots.firstIndex(where: { $0.id == rootID }) {
-            roots[idx].trackCount = tracks.reduce(0) { $0 + ($1.rootID == rootID ? 1 : 0) }
+            roots[idx].trackCount = fileCount(inRoot: rootID)
         }
         rebuildIndex()
+        reconcileDuplicates()
         save()
         return added
     }
@@ -325,6 +362,10 @@ final class MediaLibrary: ObservableObject {
             }
         }
 
+        // Done here, before anything is changed, so the duplicate check at
+        // the end has nothing slow left to do.
+        await warmSongKeys(for: result.tracks)
+
         // Preserve play counts / ratings across a rescan.
         var stats: [String: (Int, Date?, Int)] = [:]
         for t in tracks where t.rootID == rootID {
@@ -344,6 +385,8 @@ final class MediaLibrary: ObservableObject {
         }
 
         tracks.removeAll { $0.rootID == rootID }
+        // The scan found every file again, including copies that were hidden.
+        hiddenTracks.removeAll { $0.rootID == rootID }
         tracks.append(contentsOf: merged)
 
         // Replace previously imported playlists from this root.
@@ -356,6 +399,7 @@ final class MediaLibrary: ObservableObject {
         }
         lastScanSkipped = result.skipped
         rebuildIndex()
+        reconcileDuplicates()
 
         isScanning = false
         scanProgress = 1
@@ -388,7 +432,9 @@ final class MediaLibrary: ObservableObject {
         return idx
     }
 
-    func markPlayed(_ id: UUID) {
+    func markPlayed(_ rawID: UUID) {
+        // A hidden copy counts as a play of the song it is merged into.
+        let id = keeperOfHidden[rawID] ?? rawID
         guard let idx = liveIndex(of: id) else { return }
         tracks[idx].playCount += 1
         tracks[idx].lastPlayed = Date()
@@ -398,7 +444,8 @@ final class MediaLibrary: ObservableObject {
         scheduleSave()
     }
 
-    func setRating(_ rating: Int, for id: UUID) {
+    func setRating(_ rating: Int, for rawID: UUID) {
+        let id = keeperOfHidden[rawID] ?? rawID
         guard let idx = liveIndex(of: id) else { return }
         tracks[idx].rating = max(0, min(5, rating))
         scheduleSave()
@@ -421,6 +468,13 @@ final class MediaLibrary: ObservableObject {
     }
 
     func setMeasuredGain(_ gain: Float, peak: Float, for id: UUID) {
+        if liveIndex(of: id) == nil, let h = hiddenIndex[id], hiddenTracks.indices.contains(h),
+           hiddenTracks[h].id == id {
+            // Measured while a hidden copy was playing: it belongs to that file.
+            if hiddenTracks[h].replayGainTrack == nil { hiddenTracks[h].replayGainTrack = gain }
+            if hiddenTracks[h].peakTrack == nil { hiddenTracks[h].peakTrack = peak }
+            return
+        }
         guard let idx = liveIndex(of: id) else { return }
         if tracks[idx].replayGainTrack == nil { tracks[idx].replayGainTrack = gain }
         if tracks[idx].peakTrack == nil { tracks[idx].peakTrack = peak }
@@ -495,7 +549,9 @@ final class MediaLibrary: ObservableObject {
         var result = TagEditResult(written: 0, libraryOnly: 0, failures: [])
 
         var seen = Set<UUID>()
-        let ids = trackIDs.filter { seen.insert($0).inserted }
+        // Editing a hidden copy (it can still be the one playing) edits the
+        // song it is merged into.
+        let ids = trackIDs.map { keeperOfHidden[$0] ?? $0 }.filter { seen.insert($0).inserted }
         guard !ids.isEmpty, !tags.isEmpty || artwork != .keep else { return result }
 
         // 1. Cover: stored under a fresh key so every view keyed on
@@ -546,6 +602,12 @@ final class MediaLibrary: ObservableObject {
         rebuildIndex()
         saveOverrides()
         save()
+        // New tags can turn two songs into duplicates, or stop them being
+        // ones. Checked when the edit is completely finished.
+        defer {
+            reconcileDuplicates()
+            save()
+        }
         let editedIDs = Set(edited.map(\.id))
         refreshPlayerIfNeeded(editedIDs)
 
@@ -621,6 +683,343 @@ final class MediaLibrary: ObservableObject {
               let currentID = player.currentTrack?.id,
               ids.contains(currentID) else { return }
         player.refreshCurrentTrackFromLibrary()
+    }
+
+    // MARK: - Duplicates
+
+    /// How many files a folder holds, counting copies hidden as duplicates.
+    private func fileCount(inRoot rootID: UUID) -> Int {
+        tracks.reduce(0) { $0 + ($1.rootID == rootID ? 1 : 0) }
+            + hiddenTracks.reduce(0) { $0 + ($1.rootID == rootID ? 1 : 0) }
+    }
+
+    private func songKey(for track: Track) -> SongKey {
+        let raw = DuplicateFinder.rawTags(of: track)
+        if let known = songKeyCache[raw] { return known }
+        if songKeyCache.count > 60_000 { songKeyCache.removeAll(keepingCapacity: true) }
+        let made = DuplicateFinder.key(for: raw)
+        songKeyCache[raw] = made
+        return made
+    }
+
+    /// Works out the comparison keys for these songs away from the main
+    /// thread and keeps them. `reconcileDuplicates` needs a key per song;
+    /// with them ready it takes a few thousandths of a second even for a
+    /// library of many thousands of songs, so the screen never stutters.
+    private func warmSongKeys(for list: [Track]) async {
+        var missing = Set<DuplicateFinder.RawTags>()
+        for track in list {
+            let raw = DuplicateFinder.rawTags(of: track)
+            if songKeyCache[raw] == nil { missing.insert(raw) }
+        }
+        // A few hundred are quick enough to do on the spot.
+        guard missing.count > 300 else { return }
+        let todo = missing
+        let made = await Task.detached(priority: .userInitiated) { () -> [DuplicateFinder.RawTags: SongKey] in
+            var out: [DuplicateFinder.RawTags: SongKey] = [:]
+            out.reserveCapacity(todo.count)
+            for raw in todo { out[raw] = DuplicateFinder.key(for: raw) }
+            return out
+        }.value
+        if songKeyCache.count + made.count > 60_000 { songKeyCache.removeAll(keepingCapacity: true) }
+        songKeyCache.merge(made) { current, _ in current }
+    }
+
+    private func signature(of track: Track) -> String {
+        DuplicateFinder.signature(songKey(for: track), duration: track.duration)
+    }
+
+    /// Looks at the whole library again and decides, from scratch, which
+    /// songs are shown and which are hidden behind a better copy.
+    ///
+    /// The result depends only on the songs and on the user's remembered
+    /// answers, so it is safe to call as often as needed: after a scan, a
+    /// download, a tag edit, an answer. Nothing is ever deleted here.
+    func reconcileDuplicates() {
+        let rootIDs = Set(roots.map(\.id))
+        let visibleFiles = Set(tracks.map { Self.tagOverrideKey(for: $0) })
+
+        var all = tracks
+        for copy in hiddenTracks {
+            // Its folder left the library.
+            if let root = copy.rootID, !rootIDs.contains(root) { continue }
+            // A rescan found the same file again; the fresh entry replaces it.
+            if visibleFiles.contains(Self.tagOverrideKey(for: copy)) { continue }
+            all.append(copy)
+        }
+
+        var hide = Set<Int>()
+        var keeperMap: [UUID: UUID] = [:]
+        var groups: [MergedSongGroup] = []
+        var questions: [DuplicateQuestion] = []
+
+        if duplicateMemory.enabled, all.count > 1 {
+            let keys = all.map { songKey(for: $0) }
+            let result = DuplicateFinder.analyse(tracks: all, keys: keys, memory: duplicateMemory)
+            for group in result.groups {
+                guard let keep = group.first, all.indices.contains(keep) else { continue }
+                var copies: [UUID] = []
+                for other in group.dropFirst() where all.indices.contains(other) {
+                    // Everything the user built up on a copy moves to the
+                    // song that stays. Play counts are moved, not copied, so
+                    // doing this again later adds nothing twice.
+                    all[keep].playCount += all[other].playCount
+                    all[other].playCount = 0
+                    all[keep].rating = max(all[keep].rating, all[other].rating)
+                    if let played = all[other].lastPlayed,
+                       played > (all[keep].lastPlayed ?? .distantPast) {
+                        all[keep].lastPlayed = played
+                    }
+                    if all[other].dateAdded < all[keep].dateAdded {
+                        all[keep].dateAdded = all[other].dateAdded
+                    }
+                    if (all[keep].lyrics ?? "").isEmpty, let lyrics = all[other].lyrics, !lyrics.isEmpty {
+                        all[keep].lyrics = lyrics
+                    }
+                    if all[keep].artworkKey == nil { all[keep].artworkKey = all[other].artworkKey }
+                    hide.insert(other)
+                    keeperMap[all[other].id] = all[keep].id
+                    copies.append(all[other].id)
+                }
+                if !copies.isEmpty {
+                    groups.append(MergedSongGroup(keeper: all[keep].id, copies: copies))
+                }
+            }
+            questions = result.questions
+        }
+
+        var visible: [Track] = []
+        var hidden: [Track] = []
+        visible.reserveCapacity(all.count)
+        for (i, track) in all.enumerated() {
+            if hide.contains(i) { hidden.append(track) } else { visible.append(track) }
+        }
+
+        // Assigned only when something really changed, so the screens are
+        // not redrawn for nothing.
+        if visible != tracks { tracks = visible }
+        let hiddenChanged = hidden != hiddenTracks
+        if hiddenChanged { hiddenTracks = hidden }
+        rebuildIndex()
+        keeperOfHidden = keeperMap
+        if groups != mergedGroups { mergedGroups = groups }
+        if questions != duplicateQuestions { duplicateQuestions = questions }
+        pointPlaylistsAtKeepers(keeperMap)
+        if hiddenChanged { saveDuplicates() }
+    }
+
+    /// Playlists and "recently played" show the kept song instead of a
+    /// hidden copy, and never the same song twice because of a merge.
+    private func pointPlaylistsAtKeepers(_ map: [UUID: UUID]) {
+        guard !map.isEmpty else { return }
+        for i in playlists.indices where playlists[i].trackIDs.contains(where: { map[$0] != nil }) {
+            var present = Set(playlists[i].trackIDs.filter { map[$0] == nil })
+            var out: [UUID] = []
+            out.reserveCapacity(playlists[i].trackIDs.count)
+            for id in playlists[i].trackIDs {
+                if let keeper = map[id] {
+                    if present.insert(keeper).inserted { out.append(keeper) }
+                } else {
+                    out.append(id)
+                }
+            }
+            playlists[i].trackIDs = out
+        }
+        if recentlyPlayedIDs.contains(where: { map[$0] != nil }) {
+            var seen = Set<UUID>()
+            recentlyPlayedIDs = recentlyPlayedIDs.compactMap { id -> UUID? in
+                let target = map[id] ?? id
+                return seen.insert(target).inserted ? target : nil
+            }
+        }
+    }
+
+    /// The song with this id together with every copy merged into it,
+    /// the shown one first.
+    func mergedCopies(of id: UUID) -> [Track] {
+        let keeperID = keeperOfHidden[id] ?? id
+        var out: [Track] = []
+        if let keeper = track(id: keeperID) { out.append(keeper) }
+        if let group = mergedGroups.first(where: { $0.keeper == keeperID }) {
+            out.append(contentsOf: group.copies.compactMap { track(id: $0) })
+        }
+        if out.isEmpty, let only = track(id: id) { out = [only] }
+        return out
+    }
+
+    /// Records the answer to a question and applies it straight away.
+    /// With `forSimilar`, the same answer is used from now on for every
+    /// pair Sonora would have asked about for the same reason.
+    func answerDuplicate(_ question: DuplicateQuestion, _ answer: DuplicateAnswer, forSimilar: Bool) {
+        duplicateMemory.pairs[question.id] = answer
+        if forSimilar { duplicateMemory.rules[question.doubt.rawValue] = answer }
+        saveDuplicates()
+        reconcileDuplicates()
+        save()
+    }
+
+    /// Takes one hidden copy out of its group and shows it as a song of its
+    /// own again. Remembered, so it is not merged back.
+    func separateMergedCopy(_ id: UUID) {
+        guard let keeperID = keeperOfHidden[id], let copy = track(id: id) else { return }
+        let mine = signature(of: copy)
+        for other in mergedCopies(of: keeperID) where other.id != id {
+            duplicateMemory.pairs[DuplicateFinder.pairKey(mine, signature(of: other))] = .separate
+        }
+        saveDuplicates()
+        reconcileDuplicates()
+        save()
+    }
+
+    func setMergeDuplicates(_ on: Bool) {
+        guard duplicateMemory.enabled != on else { return }
+        duplicateMemory.enabled = on
+        saveDuplicates()
+        reconcileDuplicates()
+        save()
+    }
+
+    /// Forgets one "always do this" rule; those pairs are asked about again.
+    func forgetDuplicateRule(_ doubt: DuplicateDoubt) {
+        guard duplicateMemory.rules[doubt.rawValue] != nil else { return }
+        duplicateMemory.rules[doubt.rawValue] = nil
+        saveDuplicates()
+        reconcileDuplicates()
+        save()
+    }
+
+    /// Forgets every answer and rule. Clear duplicates are still merged;
+    /// everything Sonora was unsure about is asked again.
+    func forgetDuplicateAnswers() {
+        duplicateMemory.pairs = [:]
+        duplicateMemory.rules = [:]
+        saveDuplicates()
+        reconcileDuplicates()
+        save()
+    }
+
+    // MARK: - Deleting songs
+
+    /// True when the song was downloaded from Google Drive by Sonora.
+    func isDriveTrack(_ track: Track) -> Bool {
+        guard let rootID = track.rootID,
+              let driveRoot = appFolderRoot(relativePath: GoogleDriveConfig.localFolderName) else { return false }
+        return rootID == driveRoot.id
+    }
+
+    /// What deleting this song would touch, for the confirmation dialog.
+    func deleteInfo(for id: UUID) -> SongDeleteInfo? {
+        let copies = mergedCopies(of: id)
+        guard let first = copies.first else { return nil }
+        let deletable = copies.filter { !$0.isCueTrack }
+        var folder = "Files"
+        if let rootID = first.rootID, let root = roots.first(where: { $0.id == rootID }) {
+            folder = root.displayName
+        }
+        return SongDeleteInfo(title: first.displayTitle,
+                              fileName: first.fileName,
+                              folderName: folder,
+                              fileCount: deletable.count,
+                              driveCount: deletable.filter { isDriveTrack($0) }.count,
+                              isCueOnly: deletable.isEmpty)
+    }
+
+    /// Deletes the music files of these songs (and of every copy merged into
+    /// them) and takes them out of the library, the playlists and the queue.
+    ///
+    /// With `fromDrive`, a song downloaded from Google Drive is moved to the
+    /// Bin in Drive first; if that fails the copy on the iPhone is kept too,
+    /// so nothing ends up half deleted. Without it, the song stays in Drive
+    /// and sync is told not to bring it back.
+    func deleteSongs(ids: [UUID], fromDrive: Bool) async -> SongDeleteReport {
+        var report = SongDeleteReport()
+
+        var seen = Set<UUID>()
+        var targets: [Track] = []
+        for id in ids {
+            for copy in mergedCopies(of: id) where seen.insert(copy.id).inserted {
+                targets.append(copy)
+            }
+        }
+        let files = targets.filter { !$0.isCueTrack }
+        if files.count < targets.count {
+            report.problems.append("A song that is one part of a longer file can't be deleted on its own.")
+        }
+        guard !files.isEmpty else { return report }
+
+        // Move the player off these songs before their files disappear.
+        AppServices.player?.tracksWillBeDeleted(Set(files.map(\.id)))
+
+        var removed: [Track] = []
+        for track in files {
+            let name = "“\(track.displayTitle)”"
+            let isDrive = isDriveTrack(track)
+
+            if isDrive, fromDrive {
+                let drive = GoogleDriveManager.shared
+                if drive.driveFileIDs(forLocalPath: track.relativePath).isEmpty {
+                    report.problems.append("\(name): Sonora no longer knows which Google Drive file this was, so it is still in Drive.")
+                } else {
+                    do {
+                        try await drive.moveToBin(localPath: track.relativePath)
+                        report.movedToDriveBin += 1
+                    } catch {
+                        report.problems.append("\(name) wasn't deleted: Google Drive said no. \(DriveError.message(for: error))")
+                        continue
+                    }
+                }
+            }
+
+            guard let fileURL = url(for: track) else {
+                report.problems.append("\(name): Sonora can't reach this file right now.")
+                continue
+            }
+            switch await FileRemover.remove(fileURL) {
+            case .removed, .alreadyGone:
+                removed.append(track)
+                report.deleted += 1
+                if isDrive {
+                    GoogleDriveManager.shared.forgetDownload(localPath: track.relativePath,
+                                                            keepOffThisPhone: !fromDrive)
+                }
+            case .failed(let message):
+                report.problems.append("\(name): \(message)")
+            }
+        }
+
+        forget(tracks: removed)
+        if removed.contains(where: { isDriveTrack($0) }) {
+            await GoogleDriveManager.shared.refreshStorage()
+        }
+        return report
+    }
+
+    /// Takes tracks out of everything the library keeps. Files are not touched.
+    private func forget(tracks gone: [Track]) {
+        guard !gone.isEmpty else { return }
+        let ids = Set(gone.map(\.id))
+        tracks.removeAll { ids.contains($0.id) }
+        hiddenTracks.removeAll { ids.contains($0.id) }
+        for i in playlists.indices {
+            playlists[i].trackIDs.removeAll { ids.contains($0) }
+        }
+        recentlyPlayedIDs.removeAll { ids.contains($0) }
+
+        var overridesChanged = false
+        for track in gone {
+            let key = Self.tagOverrideKey(for: track)
+            if tagOverrides.removeValue(forKey: key) != nil { overridesChanged = true }
+            if artworkOverrides.removeValue(forKey: key) != nil { overridesChanged = true }
+        }
+        if overridesChanged { saveOverrides() }
+
+        rebuildIndex()
+        for i in roots.indices { roots[i].trackCount = fileCount(inRoot: roots[i].id) }
+        reconcileDuplicates()
+        saveDuplicates()
+        save()
+        // Anything the queue still holds that no longer exists.
+        AppServices.player?.pruneQueue()
     }
 
     // MARK: - Playlists
@@ -844,6 +1243,8 @@ final class MediaLibrary: ObservableObject {
     private func rebuildIndex() {
         trackIndex.removeAll(keepingCapacity: true)
         for (i, t) in tracks.enumerated() { trackIndex[t.id] = i }
+        hiddenIndex.removeAll(keepingCapacity: true)
+        for (i, t) in hiddenTracks.enumerated() { hiddenIndex[t.id] = i }
     }
 
     func load() {
@@ -904,6 +1305,42 @@ final class MediaLibrary: ObservableObject {
         }
     }
 
+    // MARK: Duplicate persistence
+
+    /// Kept apart from the library snapshot, like the tag overrides, so it
+    /// can never stop an existing library from loading.
+    private struct DuplicateSnapshot: Codable {
+        var memory: DuplicateMemory
+        var hidden: [Track]
+    }
+
+    private var duplicatesStoreURL: URL {
+        storeURL.deletingLastPathComponent().appendingPathComponent("SonoraDuplicates.json")
+    }
+
+    private func loadDuplicates() {
+        guard let data = try? Data(contentsOf: duplicatesStoreURL),
+              let snapshot = try? JSONDecoder().decode(DuplicateSnapshot.self, from: data) else { return }
+        duplicateMemory = snapshot.memory
+        let rootIDs = Set(roots.map(\.id))
+        let shown = Set(tracks.map(\.id))
+        hiddenTracks = snapshot.hidden.filter { copy in
+            if shown.contains(copy.id) { return false }
+            if let root = copy.rootID { return rootIDs.contains(root) }
+            return true
+        }
+        rebuildIndex()
+    }
+
+    private func saveDuplicates() {
+        let snapshot = DuplicateSnapshot(memory: duplicateMemory, hidden: hiddenTracks)
+        let url = duplicatesStoreURL
+        Self.saveQueue.async {
+            guard let data = try? JSONEncoder().encode(snapshot) else { return }
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
     private func scheduleSave() {
         saveWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in self?.save() }
@@ -921,6 +1358,11 @@ final class MediaLibrary: ObservableObject {
         FolderAccessManager.shared.releaseAll()
         roots.removeAll(); tracks.removeAll(); playlists.removeAll(); recentlyPlayedIDs.removeAll()
         trackIndex.removeAll()
+        // The answers about duplicates are kept: they are about songs, not
+        // about this index, and apply again when the music is added back.
+        hiddenTracks.removeAll(); hiddenIndex.removeAll(); keeperOfHidden.removeAll()
+        mergedGroups = []; duplicateQuestions = []
+        saveDuplicates()
         tagOverrides.removeAll(); artworkOverrides.removeAll()
         ArtworkStore.shared.clear()
         Task { await WaveformAnalyzer.shared.clearCache() }
@@ -946,6 +1388,33 @@ struct TagEditResult {
     /// (file name, message) for every write that failed. Those edits are
     /// still kept in the library.
     var failures: [(String, String)]
+}
+
+// MARK: - Deleting songs
+
+/// What a delete would touch. Shown before the user confirms.
+struct SongDeleteInfo {
+    var title: String
+    var fileName: String
+    /// Name of the library folder the shown copy lives in.
+    var folderName: String
+    /// Files that would be deleted (the song plus copies merged into it).
+    var fileCount: Int
+    /// How many of those were downloaded from Google Drive.
+    var driveCount: Int
+    /// True when there is nothing to delete: a cue-sheet track shares its
+    /// file with the other songs of the album.
+    var isCueOnly: Bool
+}
+
+/// What `MediaLibrary.deleteSongs` did.
+struct SongDeleteReport {
+    /// Files deleted from the iPhone.
+    var deleted = 0
+    /// Songs moved to the Bin in Google Drive.
+    var movedToDriveBin = 0
+    /// One sentence per thing that went wrong.
+    var problems: [String] = []
 }
 
 /// One file write, handed to a background task.
