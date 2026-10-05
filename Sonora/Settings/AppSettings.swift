@@ -493,8 +493,16 @@ final class AppSettings: ObservableObject {
         parseCueSheets = b("cue", true)
         importM3U = b("m3u", true)
         groupCompilations = b("compil", true)
-        trackSort = TrackSort(rawValue: s("trackSort", "trackNumber")) ?? .trackNumber
-        trackSortAscending = b("trackSortAsc", true)
+        // Song lists start with the newest additions on top. Applied once,
+        // to an existing installation too; after that whatever is chosen in
+        // the list's sort menu is kept.
+        if !d.bool(forKey: "trackSortNewestFirst.v1") {
+            d.set(true, forKey: "trackSortNewestFirst.v1")
+            d.set(TrackSort.dateAdded.rawValue, forKey: "trackSort")
+            d.set(false, forKey: "trackSortAsc")
+        }
+        trackSort = TrackSort(rawValue: s("trackSort", "dateAdded")) ?? .dateAdded
+        trackSortAscending = b("trackSortAsc", false)
         minimumTrackSeconds = n("minTrackSec", 0)
         downloadMissingArtwork = b("artDownload", true)
 
