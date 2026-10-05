@@ -305,7 +305,7 @@ struct DuplicateSettingsView: View {
         .navigationTitle("Duplicate Songs")
         .navigationBarTitleDisplayMode(.inline)
         // Room for the mini player, which floats over the bottom of the screen.
-        .safeAreaInset(edge: .bottom) { Color.clear.frame(height: 60) }
+        .miniPlayerClearance()
         .sheet(isPresented: $showReview) {
             DuplicateReviewView().themedSheet(themes)
         }
