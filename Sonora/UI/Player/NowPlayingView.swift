@@ -25,6 +25,8 @@ struct NowPlayingView: View {
     @State private var showErrorAlert = false
     @State private var editTarget: TagEditTarget?
     @State private var deleteRequest: SongDeleteRequest?
+    /// The album of the playing song, opened from the ••• menu.
+    @State private var albumToShow: AlbumGroup?
 
     private var track: Track? { player.currentTrack }
 
@@ -60,6 +62,17 @@ struct NowPlayingView: View {
             LyricsView().presentationDetents([.medium, .large]).themedSheet(themes)
         }
         .deleteSongDialog($deleteRequest)
+        .sheet(item: $albumToShow) { album in
+            NavigationStack {
+                AlbumDetailView(album: album)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button("Close") { albumToShow = nil }
+                        }
+                    }
+            }
+            .themedSheet(themes)
+        }
         // The album tint itself is kept current by RootView, which is alive
         // for the whole session (it used to be worked out only here).
         .onChange(of: player.errorMessage) { _, message in
@@ -175,6 +188,11 @@ struct NowPlayingView: View {
             Menu {
                 Button { showInfo = true } label: { Label("Track Info", systemImage: "info.circle") }
                 if let track {
+                    Button {
+                        albumToShow = library.album(containing: track)
+                    } label: {
+                        Label("Album: \(track.displayAlbum)", systemImage: "square.stack")
+                    }
                     Button {
                         editTarget = TagEditTarget(trackIDs: [track.id])
                     } label: { Label("Edit Tags", systemImage: "tag") }
@@ -647,6 +665,17 @@ struct TrackInfoView: View {
                 }
                 .themedRow(themes.theme)
                 Section("Tags") {
+                    // Opens the album, to see the other songs on it and
+                    // play from there.
+                    if let album = library.album(containing: track) {
+                        NavigationLink {
+                            AlbumDetailView(album: album)
+                        } label: {
+                            row("Album", album.title)
+                        }
+                    } else {
+                        row("Album", track.displayAlbum)
+                    }
                     row("Album Artist", track.effectiveAlbumArtist)
                     row("Genre", track.genre.isEmpty ? "—" : track.genre)
                     row("Composer", track.composer.isEmpty ? "—" : track.composer)
