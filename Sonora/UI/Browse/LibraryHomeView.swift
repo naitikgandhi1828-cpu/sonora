@@ -218,6 +218,12 @@ struct LibraryHomeView: View {
                     TrackListView(title: "All Tracks", trackIDs: library.tracks.map(\.id))
                 }
                 divider
+                navRow("Recently Added", "clock.arrow.circlepath", "Newest first") {
+                    TrackListView(title: "Recently Added",
+                                  trackIDs: library.recentlyAddedIDs(),
+                                  keepsGivenOrder: true)
+                }
+                divider
                 navRow("Playlists", "text.badge.plus", "\(library.playlists.count)") {
                     PlaylistsView()
                 }

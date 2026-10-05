@@ -459,6 +459,9 @@ struct TrackListView: View {
     let trackIDs: [UUID]
     var groupByAlbum: Bool = false
     var playlistID: UUID?
+    /// Show the songs exactly in the order given, ignoring the sort menu
+    /// (used by "Recently Added", which is newest first by definition).
+    var keepsGivenOrder: Bool = false
 
     @EnvironmentObject private var library: MediaLibrary
     @EnvironmentObject private var player: PlaybackController
@@ -501,7 +504,7 @@ struct TrackListView: View {
                 || $0.track.displayAlbum.lowercased().contains(q)
             }
         }
-        if playlistID == nil {
+        if playlistID == nil, !keepsGivenOrder {
             let compare = settings.trackSort.comparator(ascending: settings.trackSortAscending)
             list.sort { compare($0.track, $1.track) }
         }
@@ -544,7 +547,7 @@ struct TrackListView: View {
                         player.enqueue(tracks.map(\.id), playNext: false)
                     } label: { Label("Add to Queue", systemImage: "text.append") }
 
-                    if playlistID == nil {
+                    if playlistID == nil, !keepsGivenOrder {
                         Divider()
                         Picker("Sort", selection: Binding(
                             get: { settings.trackSort },

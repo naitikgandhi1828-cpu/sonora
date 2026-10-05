@@ -19,7 +19,11 @@ struct SearchView: View {
         var id: String { rawValue }
     }
 
-    private var results: [Track] { library.search(query) }
+    /// With nothing typed, every song in the library (newest first), so the
+    /// screen is a full list to scroll through; typing narrows it down.
+    private var currentResults: [Track] {
+        query.isEmpty ? library.tracksNewestFirst() : library.search(query)
+    }
 
     private var albumResults: [AlbumGroup] {
         guard !query.isEmpty else { return [] }
@@ -36,12 +40,14 @@ struct SearchView: View {
     }
 
     var body: some View {
+        // Worked out once per redraw; it is used several times below.
+        let results = currentResults
         NavigationStack {
             Group {
-                if query.isEmpty {
+                if query.isEmpty && results.isEmpty {
                     EmptyStateView(symbol: "magnifyingglass",
                                    title: "Search your library",
-                                   message: "Titles, artists, albums, genres and file names.")
+                                   message: "Your songs will be listed here once you add some music.")
                 } else if results.isEmpty && albumResults.isEmpty && artistResults.isEmpty {
                     EmptyStateView(symbol: "questionmark.folder",
                                    title: "No matches",
@@ -80,8 +86,8 @@ struct SearchView: View {
                                 .themedPlainRow(themes.theme)
                             }
                         }
-                        if scope == .all || scope == .tracks, !results.isEmpty {
-                            Section("Tracks") {
+                        if query.isEmpty || scope == .all || scope == .tracks, !results.isEmpty {
+                            Section(query.isEmpty ? "All Songs (\(results.count))" : "Tracks") {
                                 ForEach(Array(results.enumerated()), id: \.element.id) { index, track in
                                     TrackRow(track: track,
                                              isCurrent: player.currentTrack?.id == track.id,
@@ -90,7 +96,7 @@ struct SearchView: View {
                                         .onTapGesture {
                                             player.play(trackIDs: results.map(\.id),
                                                         startIndex: index,
-                                                        sourceName: "Search")
+                                                        sourceName: query.isEmpty ? "All Songs" : "Search")
                                             Haptics.tap()
                                         }
                                         .trackContextMenu(track: track)
