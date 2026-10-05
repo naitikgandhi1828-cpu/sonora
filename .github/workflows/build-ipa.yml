@@ -38,6 +38,11 @@ jobs:
           xcodebuild -version
           xcodebuild -list -project Sonora.xcodeproj
 
+      # The extra Home Screen icons (Settings > App Icon) are kept as plain
+      # PNGs in IconSources/. This turns each one into an icon set.
+      - name: Prepare the alternate app icons
+        run: python3 IconSources/make_icon_sets.py
+
       - name: Build for device without code signing
         run: |
           set -o pipefail
@@ -71,6 +76,9 @@ jobs:
           test -n "$SHORT" || { echo "FAIL: CFBundleShortVersionString missing"; exit 1; }
           test "$SHORT" != "1.0" || { echo "FAIL: version is still the 1.0 default -- MARKETING_VERSION did not apply"; exit 1; }
           echo "OK: version $SHORT (build $BUILD)"
+          ALT="$(plutil -extract CFBundleIcons.CFBundleAlternateIcons xml1 -o - "$PLIST" | grep -c "<key>AppIcon-" || true)"
+          test "$ALT" -ge 20 || { echo "FAIL: only $ALT alternate app icons made it into the app"; exit 1; }
+          echo "OK: $ALT alternate app icons"
 
       - name: Wrap the .app into a .ipa
         run: |
