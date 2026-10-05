@@ -236,7 +236,15 @@ enum TrackSort: String, CaseIterable, Codable, Identifiable {
         case .title:       return { cmp($0.displayTitle.lowercased(), $1.displayTitle.lowercased()) }
         case .artist:      return { cmp($0.displayArtist.lowercased(), $1.displayArtist.lowercased()) }
         case .album:       return { cmp($0.displayAlbum.lowercased(), $1.displayAlbum.lowercased()) }
-        case .dateAdded:   return { cmp($0.dateAdded, $1.dateAdded) }
+        case .dateAdded:
+            return {
+                // Songs that arrived together (one download, one copy) keep
+                // a steady order instead of shuffling on every redraw.
+                if $0.dateAdded == $1.dateAdded {
+                    return $0.displayTitle.lowercased() < $1.displayTitle.lowercased()
+                }
+                return cmp($0.dateAdded, $1.dateAdded)
+            }
         case .duration:    return { cmp($0.duration, $1.duration) }
         case .fileName:    return { cmp($0.fileName.lowercased(), $1.fileName.lowercased()) }
         case .playCount:   return { cmp($0.playCount, $1.playCount) }

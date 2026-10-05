@@ -71,6 +71,7 @@ final class MediaLibrary: ObservableObject {
             guard !self.isScanning else { return }
             self.reconcileDuplicates()
             self.save()
+            await self.refreshAddedDatesOnce()
         }
     }
 
@@ -685,6 +686,64 @@ final class MediaLibrary: ObservableObject {
         player.refreshCurrentTrackFromLibrary()
     }
 
+    // MARK: - Date added
+
+    /// Songs indexed by an older version carry the time of their last scan
+    /// as "date added", so they all look equally new. This reads the real
+    /// arrival date of every file, once, away from the main thread.
+    private func refreshAddedDatesOnce() async {
+        let flag = "library.addedDatesFromFiles.v1"
+        guard !UserDefaults.standard.bool(forKey: flag) else { return }
+        guard !isScanning else { return }      // tried again at the next launch
+
+        var jobs: [(UUID, URL)] = []
+        for track in tracks + hiddenTracks {
+            if let fileURL = url(for: track) { jobs.append((track.id, fileURL)) }
+        }
+        let work = jobs
+        let dates = await Task.detached(priority: .utility) { () -> [UUID: Date] in
+            var out: [UUID: Date] = [:]
+            out.reserveCapacity(work.count)
+            for (id, fileURL) in work {
+                if let date = FileDates.added(fileURL) { out[id] = date }
+            }
+            return out
+        }.value
+
+        var shown = tracks
+        var changed = false
+        for i in shown.indices {
+            if let date = dates[shown[i].id], shown[i].dateAdded != date {
+                shown[i].dateAdded = date
+                changed = true
+            }
+        }
+        for i in hiddenTracks.indices {
+            if let date = dates[hiddenTracks[i].id], hiddenTracks[i].dateAdded != date {
+                hiddenTracks[i].dateAdded = date
+                changed = true
+            }
+        }
+        if changed {
+            tracks = shown
+            rebuildIndex()
+            reconcileDuplicates()
+            saveDuplicates()
+            save()
+        }
+        UserDefaults.standard.set(true, forKey: flag)
+    }
+
+    /// Every song, the most recently added first.
+    func tracksNewestFirst() -> [Track] {
+        tracks.sorted(by: TrackSort.dateAdded.comparator(ascending: false))
+    }
+
+    /// The most recently added songs, newest first.
+    func recentlyAddedIDs(limit: Int = 200) -> [UUID] {
+        tracksNewestFirst().prefix(limit).map(\.id)
+    }
+
     // MARK: - Duplicates
 
     /// How many files a folder holds, counting copies hidden as duplicates.
@@ -770,7 +829,9 @@ final class MediaLibrary: ObservableObject {
                        played > (all[keep].lastPlayed ?? .distantPast) {
                         all[keep].lastPlayed = played
                     }
-                    if all[other].dateAdded < all[keep].dateAdded {
+                    // The newest copy decides: a song you just downloaded
+                    // again shows up among the latest additions.
+                    if all[other].dateAdded > all[keep].dateAdded {
                         all[keep].dateAdded = all[other].dateAdded
                     }
                     if (all[keep].lyrics ?? "").isEmpty, let lyrics = all[other].lyrics, !lyrics.isEmpty {
@@ -1151,7 +1212,9 @@ final class MediaLibrary: ObservableObject {
             master.children.append(node)
 
             var index: [String: FolderNode] = ["": node]
-            let rootTracks = tracks.filter { $0.rootID == root.id }
+            // Folders show every file that is really in them, including a
+            // copy that the library hides because it duplicates another song.
+            let rootTracks = (tracks + hiddenTracks).filter { $0.rootID == root.id }
                                    .sorted { $0.relativePath.lowercased() < $1.relativePath.lowercased() }
             for t in rootTracks {
                 let folder = t.relativeFolder
@@ -1160,7 +1223,7 @@ final class MediaLibrary: ObservableObject {
             }
         }
 
-        let loose = tracks.filter { $0.rootID == nil }
+        let loose = (tracks + hiddenTracks).filter { $0.rootID == nil }
         if !loose.isEmpty {
             let node = FolderNode(id: "__imported__", name: "Imported Files", rootID: nil, path: "")
             node.trackIDs = loose.map(\.id)

@@ -11,6 +11,30 @@ import Foundation
 import AVFoundation
 import UIKit
 
+/// When a music file arrived on this iPhone.
+///
+/// This is what "Date Added" means in Sonora: the newest arrivals come first
+/// whether they were copied in through the Files app or downloaded from
+/// Google Drive. It is read from the file itself, so it stays the same when
+/// a folder is rescanned (a rescan used to stamp every song with "now",
+/// which made them all look equally new).
+enum FileDates {
+
+    static func added(_ url: URL) -> Date? {
+        let keys: Set<URLResourceKey> = [.addedToDirectoryDateKey, .creationDateKey, .contentModificationDateKey]
+        guard let values = try? url.resourceValues(forKeys: keys) else { return nil }
+        // Best first: when it was put in its folder, then when it was
+        // created, then when it was last changed.
+        let candidates = [values.addedToDirectoryDate, values.creationDate, values.contentModificationDate]
+        let earliest = Date(timeIntervalSince1970: 978_307_200)      // 1 Jan 2001
+        let latest = Date().addingTimeInterval(60)
+        for candidate in candidates {
+            if let date = candidate, date > earliest, date <= latest { return date }
+        }
+        return nil
+    }
+}
+
 enum MetadataReader {
 
     struct FileInfo {
@@ -31,6 +55,7 @@ enum MetadataReader {
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
         track.fileSize = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
         track.dateModified = (attrs?[.modificationDate] as? Date) ?? Date()
+        track.dateAdded = FileDates.added(url) ?? Date()
 
         let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
 
