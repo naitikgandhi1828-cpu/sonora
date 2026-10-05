@@ -103,6 +103,7 @@ struct FolderBrowserView: View {
         } message: { _ in
             Text("Your music files stay where they are. You can add the folder again from Settings.")
         }
+        .miniPlayerClearance()
         .navigationTitle(node.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -193,6 +194,7 @@ struct AlbumsView: View {
         .background(themes.theme.background.ignoresSafeArea())
         .themedNavBar(themes.theme)
         .searchable(text: $query, prompt: "Search albums")
+        .miniPlayerClearance()
         .navigationTitle("Albums")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -290,6 +292,7 @@ struct AlbumDetailView: View {
         .listStyle(.plain)
         .themedList(themes.theme)
         .themedNavBar(themes.theme)
+        .miniPlayerClearance()
         .navigationTitle(headerTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -343,6 +346,7 @@ struct ArtistsView: View {
         .themedList(themes.theme)
         .themedNavBar(themes.theme)
         .searchable(text: $query, prompt: "Search artists")
+        .miniPlayerClearance()
         .navigationTitle("Artists")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -372,6 +376,7 @@ struct GenresView: View {
         .listStyle(.plain)
         .themedList(themes.theme)
         .themedNavBar(themes.theme)
+        .miniPlayerClearance()
         .navigationTitle("Genres")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -431,6 +436,7 @@ struct PlaylistsView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(themes.theme.background.ignoresSafeArea())
         .themedNavBar(themes.theme)
+        .miniPlayerClearance()
         .navigationTitle("Playlists")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -532,6 +538,7 @@ struct TrackListView: View {
         .themedList(themes.theme)
         .themedNavBar(themes.theme)
         .searchable(text: $query, prompt: "Filter")
+        .miniPlayerClearance()
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

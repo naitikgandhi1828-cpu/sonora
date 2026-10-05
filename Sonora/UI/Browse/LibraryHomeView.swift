@@ -20,6 +20,12 @@ struct LibraryHomeView: View {
     @State private var showFilePicker = false
     @State private var showGoogleDrive = false
     @State private var showDuplicateReview = false
+    @State private var importMessage: String?
+
+    /// The songs behind "Recently Played" that are still in the library.
+    private var recentTracks: [Track] {
+        library.tracks(ids: Array(library.recentlyPlayedIDs.prefix(20)))
+    }
 
     var body: some View {
         NavigationStack {
@@ -58,10 +64,14 @@ struct LibraryHomeView: View {
                         }
                         .disabled(library.roots.isEmpty || library.isScanning)
                         Button {
-                            Task { await library.importDocumentsFolder() }
+                            Task {
+                                let result = await library.importDocumentsFolder()
+                                importMessage = Self.importSummary(result)
+                            }
                         } label: {
                             Label("Import from Sonora Folder", systemImage: "square.and.arrow.down")
                         }
+                        .disabled(library.isScanning)
                     } label: {
                         Image(systemName: "plus.circle")
                     }
@@ -73,6 +83,13 @@ struct LibraryHomeView: View {
             }
             .sheet(isPresented: $showDuplicateReview) {
                 DuplicateReviewView().themedSheet(themes)
+            }
+            .alert("Sonora Folder",
+                   isPresented: Binding(get: { importMessage != nil },
+                                        set: { if !$0 { importMessage = nil } })) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(importMessage ?? "")
             }
             .fileImporter(isPresented: $showFolderPicker,
                           allowedContentTypes: [.folder],
@@ -91,6 +108,20 @@ struct LibraryHomeView: View {
         }
     }
 
+    /// One sentence saying what "Import from Sonora Folder" did.
+    private static func importSummary(_ result: MediaLibrary.SonoraFolderResult) -> String {
+        if result.added > 0 {
+            return "Added \(result.added) song\(result.added == 1 ? "" : "s") from the Sonora folder."
+        }
+        if result.total == 0 {
+            return "The Sonora folder has no music in it yet. In the Files app, open On My iPhone › Sonora, copy your songs or folders of songs there, then tap this again."
+        }
+        if result.removed > 0 {
+            return "Nothing new. \(result.removed) song\(result.removed == 1 ? "" : "s") no longer in the folder \(result.removed == 1 ? "was" : "were") taken out of the library."
+        }
+        return "Nothing new. All \(result.total) song\(result.total == 1 ? "" : "s") in the Sonora folder are already in your library."
+    }
+
     private var content: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
@@ -101,7 +132,9 @@ struct LibraryHomeView: View {
                     }
                 }
                 quickActions
-                if !library.recentlyPlayedIDs.isEmpty { recentSection }
+                // Only when there is something to show: the heading alone
+                // used to sit on top of "Browse" with nothing under it.
+                if !recentTracks.isEmpty { recentSection }
                 browseGrid
                 statsFooter
             }
@@ -170,7 +203,7 @@ struct LibraryHomeView: View {
             SectionHeader(title: "Recently Played")
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
-                    ForEach(library.tracks(ids: Array(library.recentlyPlayedIDs.prefix(20)))) { track in
+                    ForEach(recentTracks) { track in
                         Button {
                             player.play(trackIDs: [track.id], sourceName: "Recently Played")
                         } label: {

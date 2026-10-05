@@ -112,6 +112,7 @@ struct SearchView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(themes.theme.background.ignoresSafeArea())
             .themedNavBar(themes.theme)
+            .miniPlayerClearance()
             .navigationTitle("Search")
             .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Songs, albums, artists")
             .toolbar {
