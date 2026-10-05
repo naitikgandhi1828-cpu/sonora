@@ -318,3 +318,25 @@ enum Haptics {
     static func select() { UISelectionFeedbackGenerator().selectionChanged() }
     static func success() { UINotificationFeedbackGenerator().notificationOccurred(.success) }
 }
+
+// MARK: - Room for the mini player
+
+/// The mini player floats over the bottom of every tab. A screen that
+/// scrolls uses this so its last rows can be scrolled clear of it, instead
+/// of staying hidden underneath. It takes no space while nothing is loaded
+/// in the player.
+private struct MiniPlayerClearance: ViewModifier {
+    @EnvironmentObject private var player: PlaybackController
+
+    func body(content: Content) -> some View {
+        content.safeAreaInset(edge: .bottom, spacing: 0) {
+            Color.clear.frame(height: player.currentTrack == nil ? 0 : 64)
+        }
+    }
+}
+
+extension View {
+    func miniPlayerClearance() -> some View {
+        modifier(MiniPlayerClearance())
+    }
+}
