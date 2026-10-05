@@ -207,6 +207,7 @@ struct DriveBrowserView: View {
         let size = item.size.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
         var parts: [String] = []
         if let size { parts.append(size) }
+        if item.isVideo { parts.append("Video, saved as audio") }
         switch state {
         case .notDownloaded:
             break

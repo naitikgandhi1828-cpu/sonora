@@ -233,7 +233,7 @@ struct GoogleDriveView: View {
         } header: {
             Text("Browse Drive")
         } footer: {
-            Text("Open a folder, then tap a song to download it, or download the whole folder. Downloaded songs appear in your library and play without internet.")
+            Text("Open a folder, then tap a song to download it, or download the whole folder. Downloaded songs appear in your library and play without internet.\n\nVideos (.mp4, .m4v, .mov) are saved as audio: Sonora downloads the video, keeps only its sound and removes the video from your iPhone. The video in Google Drive is never changed.")
         }
         .foregroundStyle(themes.theme.textPrimary)
         .themedRow(themes.theme)
