@@ -172,15 +172,21 @@ enum DriveAPI {
         }
         // Google Docs, Sheets and so on are not files that can be downloaded.
         if mime.hasPrefix("application/vnd.google-apps") { return nil }
-        guard let localName = DriveFileNames.playableLocalName(name: name, mimeType: mime) else {
-            return nil
+        var isVideo = false
+        var localName = DriveFileNames.playableLocalName(name: name, mimeType: mime)
+        if localName == nil, let audioName = DriveFileNames.audioNameForVideo(name: name, mimeType: mime) {
+            // A music video: Sonora keeps its sound only.
+            localName = audioName
+            isVideo = true
         }
+        guard let localName else { return nil }
         // A shortcut's own size and dates describe the link, not the song.
         return DriveItem(id: id, name: name, isFolder: false,
                          size: isShortcut ? nil : file.size?.value,
                          modifiedTime: isShortcut ? nil : file.modifiedTime,
                          md5: isShortcut ? nil : file.md5Checksum,
-                         localName: localName)
+                         localName: localName,
+                         isVideo: isVideo)
     }
 
     // MARK: Bin

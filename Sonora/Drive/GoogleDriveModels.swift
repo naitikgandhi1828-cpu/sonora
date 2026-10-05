@@ -103,8 +103,13 @@ struct DriveItem: Identifiable, Hashable {
     let modifiedTime: String?
     let md5: String?
     /// File name to use on disk: `name`, plus an extension when the Drive
-    /// name had none but its type told us what it is.
+    /// name had none but its type told us what it is. For a video it ends
+    /// in ".m4a", because only the sound is kept.
     let localName: String
+    /// A video whose sound Sonora saves as audio. The video itself is
+    /// downloaded, turned into an audio file and then removed from the
+    /// iPhone; the copy in Drive is never changed.
+    var isVideo: Bool = false
 }
 
 /// A place in Drive the browser can show.
@@ -277,6 +282,18 @@ enum DriveFileNames {
             return name + "." + guessed
         }
         return nil
+    }
+
+    /// Video types whose sound can be saved as an audio file.
+    private static let videoExtensions: Set<String> = ["mp4", "m4v", "mov"]
+
+    /// For a video Sonora can take the sound from: the name of the audio
+    /// file it becomes ("Song.mp4" → "Song.m4a"). Otherwise nil.
+    static func audioNameForVideo(name: String, mimeType: String) -> String? {
+        let ext = (name as NSString).pathExtension.lowercased()
+        guard mimeType.lowercased().hasPrefix("video/"), videoExtensions.contains(ext) else { return nil }
+        let base = (name as NSString).deletingPathExtension
+        return (base.isEmpty ? "Untitled" : base) + ".m4a"
     }
 
     /// Makes one Drive name safe as a single file or folder name: no "/" or

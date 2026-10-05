@@ -139,6 +139,8 @@ struct DriveJob: Identifiable, Hashable {
     let md5: String?
     let modifiedTime: String?
     let wifiOnly: Bool
+    /// The Drive file is a video; only its sound is kept (see `DriveItem.isVideo`).
+    var isVideo: Bool = false
 }
 
 struct DrivePlan {
@@ -198,7 +200,8 @@ enum DrivePlanner {
                     plan.jobs.append(DriveJob(id: item.id, name: item.name,
                                               relativePath: entry.relativePath,
                                               expectedSize: item.size, md5: item.md5,
-                                              modifiedTime: item.modifiedTime, wifiOnly: wifiOnly))
+                                              modifiedTime: item.modifiedTime, wifiOnly: wifiOnly,
+                                              isVideo: item.isVideo))
                 }
                 continue
             }
@@ -246,7 +249,8 @@ enum DrivePlanner {
 
                 plan.jobs.append(DriveJob(id: item.id, name: item.name, relativePath: relative,
                                           expectedSize: item.size, md5: item.md5,
-                                          modifiedTime: item.modifiedTime, wifiOnly: wifiOnly))
+                                          modifiedTime: item.modifiedTime, wifiOnly: wifiOnly,
+                                              isVideo: item.isVideo))
                 owners[key] = item.id
                 known[item.id] = (item.size, item.md5)
                 break

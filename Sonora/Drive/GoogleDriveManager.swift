@@ -584,15 +584,17 @@ final class GoogleDriveManager: ObservableObject {
 
         switch result {
         case .success(let size):
-            if let expected = job.expectedSize, expected > 0, size != expected {
+            if !job.isVideo, let expected = job.expectedSize, expected > 0, size != expected {
                 // Short or padded: not the file Drive described.
                 try? FileManager.default.removeItem(at: destination)
                 downloaded[job.id] = nil
                 failures.append(DriveFailure(name: job.name,
                                              message: "The download was incomplete. Try again."))
             } else {
+                // For a video the index remembers the size Drive reports
+                // (the video's), so a later sync can tell it has not changed.
                 downloaded[job.id] = DriveIndexEntry(relativePath: job.relativePath,
-                                                     size: size,
+                                                     size: job.isVideo ? (job.expectedSize ?? size) : size,
                                                      md5: job.md5,
                                                      modifiedTime: job.modifiedTime)
                 pendingPaths.append(job.relativePath)
@@ -636,6 +638,9 @@ final class GoogleDriveManager: ObservableObject {
     private func attempt(_ job: DriveJob, destination: URL) async -> Result<Int64, Error> {
         let fileID = job.id
         let wifiOnly = job.wifiOnly
+        if job.isVideo {
+            return await attemptVideo(job, destination: destination)
+        }
         do {
             let size = try await withToken { token in
                 try await DriveAPI.download(fileID: fileID,
@@ -649,6 +654,38 @@ final class GoogleDriveManager: ObservableObject {
                 })
             }
             return .success(size)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    /// A video: download it to a temporary place, save its sound as an
+    /// audio file in the library folder, and remove the video from the
+    /// iPhone. Nothing is changed in Google Drive.
+    private func attemptVideo(_ job: DriveJob, destination: URL) async -> Result<Int64, Error> {
+        let fileID = job.id
+        let wifiOnly = job.wifiOnly
+        var ext = (job.name as NSString).pathExtension.lowercased()
+        if ext.isEmpty { ext = "mp4" }
+        let video = DriveAPI.stagingFolder.appendingPathComponent(UUID().uuidString + "." + ext)
+        defer { try? FileManager.default.removeItem(at: video) }
+        do {
+            let videoSize = try await withToken { token in
+                try await DriveAPI.download(fileID: fileID,
+                                            token: token,
+                                            destination: video,
+                                            wifiOnly: wifiOnly,
+                                            progress: { [weak self] bytes in
+                    Task { @MainActor [weak self] in
+                        self?.noteProgress(fileID, bytes)
+                    }
+                })
+            }
+            if let expected = job.expectedSize, expected > 0, videoSize != expected {
+                throw DriveError.api("The download was incomplete. Try again.")
+            }
+            try await VideoAudioExtractor.extractAudio(from: video, to: destination)
+            return .success(DriveLocalFolder.fileSize(destination) ?? 0)
         } catch {
             return .failure(error)
         }
