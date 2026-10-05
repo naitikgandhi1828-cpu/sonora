@@ -228,6 +228,11 @@ struct SettingsView: View {
                 }
             }
             NavigationLink {
+                AppIconPickerView()
+            } label: {
+                Label("App Icon", systemImage: "app.badge")
+            }
+            NavigationLink {
                 VisualEffectsView()
             } label: {
                 Label("Visual Effects", systemImage: "sparkles")
