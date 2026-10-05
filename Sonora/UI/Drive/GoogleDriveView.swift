@@ -46,7 +46,7 @@ struct GoogleDriveView: View {
         .navigationBarTitleDisplayMode(.inline)
         .safeAreaInset(edge: .top, spacing: 0) { DriveProgressBanner() }
         // Room for the mini player, which floats over the bottom of the screen.
-        .safeAreaInset(edge: .bottom) { Color.clear.frame(height: 60) }
+        .miniPlayerClearance()
         .task {
             if !didPrepare {
                 didPrepare = true
