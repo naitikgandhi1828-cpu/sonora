@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct RootView: View {
 
@@ -17,6 +18,11 @@ struct RootView: View {
     @State private var selectedTab = 0
     @State private var showFullPlayer = false
     @State private var showErrorAlert = false
+    /// True while the on-screen keyboard is up. The mini player is taken
+    /// away for that time: it is pinned to the bottom of the screen, so the
+    /// keyboard used to push it up into the middle of the list being typed
+    /// into, where it covered the rows.
+    @State private var keyboardIsUp = false
     @State private var showDuplicateReview = false
     /// Sonora brings the question up by itself once per launch; after that
     /// the card on the Library screen is the way in.
@@ -47,7 +53,7 @@ struct RootView: View {
             }
             .tint(themes.accent)
 
-            if player.currentTrack != nil {
+            if player.currentTrack != nil, !keyboardIsUp {
                 MiniPlayerView(showFullPlayer: $showFullPlayer)
                     .padding(.bottom, 49)   // sits above the tab bar
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -55,6 +61,12 @@ struct RootView: View {
         }
         .background(themes.theme.background.ignoresSafeArea())
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: player.currentTrack?.id)
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            keyboardIsUp = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            keyboardIsUp = false
+        }
         .fullScreenCover(isPresented: $showFullPlayer) {
             NowPlayingView()
                 .themedSheet(themes)
@@ -142,6 +154,6 @@ private struct QueueContentView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) { EditButton().tint(themes.accent) }
         }
-        .safeAreaInset(edge: .bottom) { Color.clear.frame(height: 60) }
+        .miniPlayerClearance()
     }
 }

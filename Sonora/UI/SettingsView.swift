@@ -36,6 +36,7 @@ struct SettingsView: View {
             }
             .themedList(themes.theme)
             .themedNavBar(themes.theme)
+            .miniPlayerClearance()
             .navigationTitle("Settings")
             .fileImporter(isPresented: $showFolderPicker,
                           allowedContentTypes: [.folder],
@@ -413,6 +414,7 @@ struct ThemePickerView: View {
         .tint(themes.accent)
         .themedList(themes.theme)
         .themedNavBar(themes.theme)
+        .miniPlayerClearance()
         .navigationTitle("Theme")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { accentDraft = themes.customAccent ?? themes.baseTheme.accent }
@@ -543,6 +545,7 @@ struct VisualEffectsView: View {
         .tint(themes.accent)
         .themedList(themes.theme)
         .themedNavBar(themes.theme)
+        .miniPlayerClearance()
         .navigationTitle("Visual Effects")
         .navigationBarTitleDisplayMode(.inline)
     }
