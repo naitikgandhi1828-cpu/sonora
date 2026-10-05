@@ -227,35 +227,105 @@ final class MediaLibrary: ObservableObject {
         scanStatus = added > 0 ? "Added \(added) file\(added == 1 ? "" : "s")" : "Nothing new to add"
     }
 
-    /// Picks up anything the user dropped into the app's Documents folder
-    /// through the Files app.
-    func importDocumentsFolder() async {
-        let docs = FolderAccessManager.documentsFolder
-        let fm = FileManager.default
-        guard let entries = try? fm.contentsOfDirectory(at: docs,
-                                                        includingPropertiesForKeys: nil,
-                                                        options: [.skipsHiddenFiles]) else { return }
-        let audio = entries.filter { AudioFormats.isPlayable($0.pathExtension) }
-        guard !audio.isEmpty else { return }
-
+    /// What a look through the Sonora folder found.
+    struct SonoraFolderResult {
+        /// Songs added to the library just now.
         var added = 0
-        for url in audio {
-            let relative = url.lastPathComponent
-            if tracks.contains(where: { $0.rootID == nil && $0.relativePath == relative }) { continue }
-            guard var info = await MetadataReader.read(url: url, rootID: nil, relativePath: relative) else { continue }
-            info.track.standaloneBookmark = FolderAccessManager.shared.makeBookmark(for: url)
-            if let data = info.artwork {
-                info.track.artworkKey = ArtworkStore.shared.store(data, forAlbumKey: info.track.albumKey)
-            }
-            applyOverrides(to: &info.track)
-            tracks.append(info.track)
-            added += 1
+        /// Songs taken out because their files are gone.
+        var removed = 0
+        /// Music files in the folder altogether.
+        var total = 0
+    }
+
+    static let sonoraFolderName = "Sonora Folder"
+
+    /// Every playable file in Sonora's own folder, as paths inside it, at
+    /// any depth. `skipping` names a folder at the top level to leave out.
+    nonisolated private static func audioFiles(in folder: URL, skipping: String) -> [String] {
+        var out: [String] = []
+        let rootPath = folder.standardizedFileURL.path
+        guard let walker = FileManager.default.enumerator(at: folder,
+                                                          includingPropertiesForKeys: [.isRegularFileKey],
+                                                          options: [.skipsHiddenFiles, .skipsPackageDescendants]) else {
+            return out
         }
-        if added > 0 {
+        for case let url as URL in walker {
+            guard AudioFormats.isPlayable(url.pathExtension) else { continue }
+            let relative = LibraryIndexer.relativePath(of: url, under: rootPath)
+            if relative == skipping || relative.hasPrefix(skipping + "/") { continue }
+            out.append(relative)
+        }
+        return out
+    }
+
+    /// Brings the library up to date with Sonora's own folder (Files ›
+    /// On My iPhone › Sonora): songs copied there, in the folder itself or
+    /// in folders inside it, are added; songs whose files were removed are
+    /// taken out. Runs when the app opens and from "Import from Sonora
+    /// Folder".
+    ///
+    /// The folder is an ordinary library folder ("Sonora Folder"). Only new
+    /// files have their tags read, so this stays quick however much music
+    /// is already there. The "Google Drive" folder inside it is a library
+    /// folder of its own and is left to the Drive screen.
+    @discardableResult
+    func importDocumentsFolder() async -> SonoraFolderResult {
+        var result = SonoraFolderResult()
+        let docs = FolderAccessManager.documentsFolder
+        let driveFolder = GoogleDriveConfig.localFolderName
+        let found = await Task.detached(priority: .userInitiated) { () -> [String] in
+            MediaLibrary.audioFiles(in: docs, skipping: driveFolder)
+        }.value
+        result.total = found.count
+
+        let existing = appFolderRoot(relativePath: "")
+        guard existing != nil || !found.isEmpty else { return result }
+        let rootID = existing?.id
+            ?? ensureAppFolderRoot(relativePath: "", displayName: Self.sonoraFolderName)
+        let inFolder = Set(found)
+
+        // Songs an older version imported one at a time from this folder
+        // now simply belong to it. They keep their plays and ratings.
+        var adopted = false
+        var shown = tracks
+        for i in shown.indices where shown[i].rootID == nil && inFolder.contains(shown[i].relativePath) {
+            shown[i].rootID = rootID
+            shown[i].standaloneBookmark = nil
+            adopted = true
+        }
+        for i in hiddenTracks.indices where hiddenTracks[i].rootID == nil
+            && inFolder.contains(hiddenTracks[i].relativePath) {
+            hiddenTracks[i].rootID = rootID
+            hiddenTracks[i].standaloneBookmark = nil
+            adopted = true
+        }
+        if adopted {
+            tracks = shown
             rebuildIndex()
+        }
+
+        let known = Set((tracks + hiddenTracks).filter { $0.rootID == rootID }.map(\.relativePath))
+        let fresh = found.filter { !known.contains($0) }
+        if !fresh.isEmpty {
+            isScanning = true
+            scanProgress = 0
+            scanStatus = fresh.count == 1 ? "Reading 1 new song…" : "Reading \(fresh.count) new songs…"
+            result.added = await indexFiles(rootID: rootID, relativePaths: fresh)
+            isScanning = false
+            scanStatus = ""
+        }
+
+        // Files deleted from the folder since last time.
+        let gone = (tracks + hiddenTracks).filter { $0.rootID == rootID && !inFolder.contains($0.relativePath) }
+        if !gone.isEmpty {
+            result.removed = gone.count
+            forget(tracks: gone)
+        } else if adopted {
+            for i in roots.indices { roots[i].trackCount = fileCount(inRoot: roots[i].id) }
             reconcileDuplicates()
             save()
         }
+        return result
     }
 
     /// Adds specific files under a root to the library without rescanning
@@ -352,9 +422,14 @@ final class MediaLibrary: ObservableObject {
         scanStatus = "Scanning \(root.displayName)…"
         await indexer.reset()
 
-        let cfg = LibraryIndexer.IndexSettings(parseCueSheets: settings.parseCueSheets,
+        var cfg = LibraryIndexer.IndexSettings(parseCueSheets: settings.parseCueSheets,
                                                importM3U: settings.importM3U,
                                                minimumSeconds: settings.minimumTrackSeconds)
+        // Sonora's own folder also holds the Google Drive downloads, which
+        // are a library folder of their own.
+        if root.appRelativePath == "" {
+            cfg.skipTopFolders = [GoogleDriveConfig.localFolderName]
+        }
 
         let result = await indexer.index(root: root, rootURL: url, settings: cfg) { progress in
             Task { @MainActor [weak self] in
@@ -367,19 +442,23 @@ final class MediaLibrary: ObservableObject {
         // the end has nothing slow left to do.
         await warmSongKeys(for: result.tracks)
 
-        // Preserve play counts / ratings across a rescan.
-        var stats: [String: (Int, Date?, Int)] = [:]
-        for t in tracks where t.rootID == rootID {
-            stats[t.relativePath + "|" + Self.cueKey(t.cueStart)] = (t.playCount, t.lastPlayed, t.rating)
+        // A song that was already known keeps its identity, play count and
+        // rating across a rescan. Keeping the identity is what lets
+        // playlists, "Recently Played" and the play queue go on pointing at
+        // it; it used to be replaced, which emptied all three.
+        var stats: [String: (Int, Date?, Int, UUID)] = [:]
+        for t in tracks + hiddenTracks where t.rootID == rootID {
+            stats[t.relativePath + "|" + Self.cueKey(t.cueStart)] = (t.playCount, t.lastPlayed, t.rating, t.id)
         }
 
         var merged = result.tracks
         for i in merged.indices {
             let key = merged[i].relativePath + "|" + Self.cueKey(merged[i].cueStart)
-            if let s = stats[key] {
+            if let s = stats.removeValue(forKey: key) {
                 merged[i].playCount = s.0
                 merged[i].lastPlayed = s.1
                 merged[i].rating = s.2
+                merged[i].id = s.3
             }
             // Edits made in Sonora win over what the file says.
             applyOverrides(to: &merged[i])
@@ -732,6 +811,14 @@ final class MediaLibrary: ObservableObject {
             save()
         }
         UserDefaults.standard.set(true, forKey: flag)
+    }
+
+    /// The album a song belongs to, as the Albums screen shows it.
+    func album(containing track: Track) -> AlbumGroup? {
+        // A hidden copy belongs to the album of the song it is merged into.
+        let shown = mergedCopies(of: track.id).first ?? track
+        let key = shown.albumKey
+        return albums.first { $0.id == key } ?? albums.first { $0.id == track.albumKey }
     }
 
     /// Every song, the most recently added first.

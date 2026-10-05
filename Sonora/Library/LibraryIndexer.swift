@@ -52,10 +52,18 @@ actor LibraryIndexer {
         var cueURLs: [URL] = []
         var playlistURLs: [URL] = []
 
+        let scanRootPath = rootURL.standardizedFileURL.path
         for case let url as URL in enumerator {
             if cancelled { return result }
             let ext = url.pathExtension.lowercased()
             guard !ext.isEmpty else { continue }
+            if !settings.skipTopFolders.isEmpty {
+                let relative = Self.relativePath(of: url, under: scanRootPath)
+                if let top = relative.split(separator: "/").first,
+                   relative.contains("/"), settings.skipTopFolders.contains(String(top)) {
+                    continue
+                }
+            }
             if AudioFormats.isPlayable(ext) {
                 audioURLs.append(url)
             } else if ext == AudioFormats.cueExtension, settings.parseCueSheets {
@@ -187,6 +195,10 @@ actor LibraryIndexer {
         var parseCueSheets: Bool
         var importM3U: Bool
         var minimumSeconds: Double
+        /// Folders directly inside the root that are left out. Used for
+        /// Sonora's own folder, where "Google Drive" is a library folder
+        /// of its own and must not be listed twice.
+        var skipTopFolders: Set<String> = []
     }
 
     static func relativePath(of url: URL, under rootPath: String) -> String {
